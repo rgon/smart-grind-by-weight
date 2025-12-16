@@ -118,6 +118,16 @@ void TaskManager::cleanup_queues() {
 
 bool TaskManager::create_all_tasks() {
     // Create tasks in order of priority (highest to lowest)
+
+    // Check PSRAM
+    if (psramFound()) {
+        LOG_BLE("PSRAM found: %u bytes free\n", ESP.getFreePsram());
+    } else {
+        LOG_BLE("WARNING: PSRAM not found!\n");
+    }
+    LOG_BLE("Internal RAM: %u bytes free\n", ESP.getFreeHeap());
+    
+
     
     if (!create_weight_sampling_task()) {
         LOG_BLE("ERROR: Failed to create weight sampling task\n");

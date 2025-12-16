@@ -31,12 +31,12 @@
 #define SYS_TASK_BLUETOOTH_INTERVAL_MS 20                                      // Bluetooth handling frequency (50Hz) - Core 1
 #define SYS_TASK_FILE_IO_INTERVAL_MS 100                                       // File I/O operations frequency (10Hz) - Core 1
 
-// Task Stack Sizes (bytes) - Increased for BLE_LOG overhead and complex operations
-#define SYS_TASK_WEIGHT_SAMPLING_STACK_SIZE 4096                               // 4KB stack for weight sampling (was 2KB, increased for BLE_LOG)
-#define SYS_TASK_GRIND_CONTROL_STACK_SIZE 6144                                 // 6KB stack for grind control logic (was 4KB, increased for complex algorithms)
-#define SYS_TASK_UI_STACK_SIZE 8192                                            // 8KB stack for LVGL rendering (unchanged)
-#define SYS_TASK_BLUETOOTH_STACK_SIZE 4096                                     // 4KB stack for BLE operations (unchanged)
-#define SYS_TASK_FILE_IO_STACK_SIZE 6144                                       // 6KB stack for LittleFS operations (was 4KB, increased for file operations)
+// Task Stack Sizes (bytes) - Optimized for Internal RAM usage
+#define SYS_TASK_WEIGHT_SAMPLING_STACK_SIZE 3072                               // 3KB stack for weight sampling (reduced from 4KB)
+#define SYS_TASK_GRIND_CONTROL_STACK_SIZE 5120                                 // 5KB stack for grind control logic (reduced from 6KB)
+#define SYS_TASK_UI_STACK_SIZE 8192                                            // 8KB stack for LVGL rendering (increased from 6KB)
+#define SYS_TASK_BLUETOOTH_STACK_SIZE 4096                                     // 4KB stack for BLE operations
+#define SYS_TASK_FILE_IO_STACK_SIZE 4096                                       // 4KB stack for LittleFS operations (reduced from 6KB)
 
 // Task Priorities (higher number = higher priority)
 #define SYS_TASK_PRIORITY_WEIGHT_SAMPLING 4                                    // Highest priority (real-time sampling)
