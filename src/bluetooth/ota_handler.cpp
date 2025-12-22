@@ -6,8 +6,6 @@
 #include "../tasks/task_manager.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <BLEDevice.h>
-#include "Serial.h"
 #include <esp_clk_tree.h>
 #include <soc/rtc.h>
 #include <cstring>
@@ -38,7 +36,7 @@ void OTAHandler::init(Preferences* prefs) {
     // Get current firmware build number
     char build_str[16];
     snprintf(build_str, sizeof(build_str), "%d", BUILD_NUMBER);
-    current_firmware_build_number = String(build_str);
+    current_firmware_build_number = std::string(build_str);
     
     // Log initial power state
     rtc_cpu_freq_config_t freq;
@@ -106,7 +104,7 @@ void OTAHandler::restore_normal_power() {
     LOG_BLE("OTA Power: Normal power mode restored\n");
 }
 
-bool OTAHandler::start_ota(uint32_t size, const String& expected_build_number, bool is_full_update, const String& expected_firmware_version) {
+bool OTAHandler::start_ota(uint32_t size, const std::string& expected_build_number, bool is_full_update, const std::string& expected_firmware_version) {
     LOG_OTA_DEBUG("start_ota() called - size=%lu, build=%s, full=%d\n", 
                   (unsigned long)size, expected_build_number.c_str(), is_full_update);
     
@@ -125,17 +123,17 @@ bool OTAHandler::start_ota(uint32_t size, const String& expected_build_number, b
                   (unsigned long)patch_size, (unsigned long)received_size, this->is_full_update);
     
     // Store expected build number and firmware version for post-reboot verification
-    if (!expected_build_number.isEmpty() && preferences) {
+    if (!expected_build_number.empty() && preferences) {
         preferences->putString("new_build_nr", expected_build_number.c_str());
         LOG_OTA_DEBUG("Stored expected build number: %s\n", expected_build_number.c_str());
     } else {
         LOG_OTA_DEBUG("No expected build number to store\n");
     }
     
-    if (!expected_firmware_version.isEmpty() && preferences) {
+    if (!expected_firmware_version.empty() && preferences) {
         preferences->putString("new_fw_ver", expected_firmware_version.c_str());
         LOG_OTA_DEBUG("Stored expected firmware version: %s\n", expected_firmware_version.c_str());
-    } else if (expected_build_number.isEmpty()) {
+    } else if (expected_build_number.empty()) {
         LOG_OTA_DEBUG("No expected firmware version to store\n");
     }
     
@@ -343,7 +341,7 @@ bool OTAHandler::finalize_update() {
     
     // Apply the delta patch
     LOG_OTA_DEBUG("Calling delta_check_and_apply() with size=%lu...\n", (unsigned long)patch_size);
-    Serial.flush();
+    // No Serial in ESP-IDF-only build; ensure buffers are flushed via BLE if needed
     int result = delta_check_and_apply(patch_size, &opts);
     LOG_OTA_DEBUG("delta_check_and_apply() returned: %d\n", result);
     if (result < 0) {
@@ -372,7 +370,7 @@ std::string OTAHandler::check_ota_failure_after_boot() {
     std::string current_version = BUILD_FIRMWARE_VERSION;
 
     // Web flasher sends firmware version - use that for verification (more reliable)
-    if (!expected_version.isEmpty()) {
+    if (!expected_version.empty()) {
         if (strcmp(expected_version.c_str(), current_version.c_str()) != 0) {
             LOG_BLE("OTA: Version check failed - expected v%s, got v%s\n",
                          expected_version.c_str(), current_version.c_str());
@@ -389,8 +387,8 @@ std::string OTAHandler::check_ota_failure_after_boot() {
     }
 
     // Python flasher sends build number only - use that for verification
-    if (!expected_build.isEmpty()) {
-        int expected_build_num = expected_build.toInt();
+    if (!expected_build.empty()) {
+        int expected_build_num = atoi(expected_build.c_str());
         if (current_build != expected_build_num) {
             LOG_BLE("OTA: Build number check failed - expected #%d, got #%d\n",
                          expected_build_num, current_build);

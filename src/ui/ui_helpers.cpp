@@ -2,7 +2,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "Serial.h"
+#include "../config/logging.h"
+#include <esp_timer.h>
 
 void style_as_button(lv_obj_t* object, int32_t width, int32_t height, const lv_font_t* font) {
     lv_obj_set_style_radius(object, THEME_CORNER_RADIUS_PX, 0);
@@ -206,18 +207,18 @@ static void radio_button_event_handler(lv_event_t* e) {
 static void radio_button_group_delete_handler(lv_event_t* e) {
     lv_obj_t* group = (lv_obj_t*)lv_event_get_target(e);
     if (!group) {
-        Serial.println("[RADIO_BTN] Delete handler called with null group");
+        LOG_BLE("[RADIO_BTN] Delete handler called with null group\n");
         return;
     }
 
     RadioButtonGroupData* data = (RadioButtonGroupData*)lv_obj_get_user_data(group);
     // Check if already freed (user_data is nullptr)
     if (!data) {
-        Serial.println("[RADIO_BTN] Delete handler called but data already freed");
+        LOG_BLE("[RADIO_BTN] Delete handler called but data already freed\n");
         return;
     }
 
-    Serial.printf("[%lums RADIO_BTN] Freeing radio button group data\n", millis());
+    LOG_BLE("[%lums RADIO_BTN] Freeing radio button group data\n", (unsigned long)(esp_timer_get_time() / 1000));
 
     // Clear user data first to prevent double-free if this handler is called again
     lv_obj_set_user_data(group, nullptr);
@@ -229,7 +230,7 @@ static void radio_button_group_delete_handler(lv_event_t* e) {
     }
     free(data);
 
-    Serial.printf("[%lums RADIO_BTN] Radio button group freed successfully\n", millis());
+    LOG_BLE("[%lums RADIO_BTN] Radio button group freed successfully\n", (unsigned long)(esp_timer_get_time() / 1000));
 }
 
 lv_obj_t* create_radio_button_group(

@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-#include "Serial.h"
+#include "../../config/logging.h"
 
 #include "../ui_manager.h"
 
@@ -158,8 +158,8 @@ void OtaDataExportController::stop_data_export_ui() {
     data_export_active_ = false;
 
     if (auto* bluetooth = ui_manager_->bluetooth_manager) {
-        Serial.printf("UI: Data export ended - progress was at %d%%\n",
-                      static_cast<int>(bluetooth->get_data_export_progress()));
+        LOG_BLE("UI: Data export ended - progress was at %d%%\n",
+                static_cast<int>(bluetooth->get_data_export_progress()));
         bluetooth->stop_data_export();
     }
 

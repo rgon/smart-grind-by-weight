@@ -2,6 +2,7 @@
 
 #include "esp_log.h"
 #include <cstdio>
+#include <cstdarg>
 
 // Note: BLE logging bridge removed during ESP-IDF migration.
 // Avoid referencing BluetoothManager from logging to keep modules decoupled.
@@ -96,6 +97,11 @@
 static inline void logging_init(void) {
     /* Set default log level to INFO, can be overridden via esp_log_level_set() */
     esp_log_level_set("*", ESP_LOG_INFO);
+    
+    /* Ensure logs go to the active console (USB CDC) and flush immediately */
+    esp_log_set_vprintf(&vprintf);
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
     
     /* Optional: Suppress verbose logs from specific components */
     esp_log_level_set("esp_littlefs", ESP_LOG_WARN);
