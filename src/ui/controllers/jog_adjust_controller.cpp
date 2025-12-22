@@ -1,6 +1,5 @@
 #include "jog_adjust_controller.h"
 
-#include <Arduino.h>
 #include "../../config/constants.h"
 #include "../../controllers/grind_mode_traits.h"
 #include "../ui_manager.h"

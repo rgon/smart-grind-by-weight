@@ -3,10 +3,13 @@
 #include "../hardware/WeightSensor.h"
 #include "../controllers/grind_controller.h"
 #include "../config/constants.h"
+#include "esp_timer.h"
 
 DiagnosticsController::DiagnosticsController()
     : hardware_manager_(nullptr) {
 }
+
+
 
 void DiagnosticsController::init(HardwareManager* hw_mgr) {
     hardware_manager_ = hw_mgr;

@@ -20,3 +20,6 @@
 #include "build_info.h"
 #include "logging.h"
 #include "display_profiles.h"
+
+// Provide Arduino-like time helpers globally
+#include "../utils/time_utils.h"

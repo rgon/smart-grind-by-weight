@@ -1,12 +1,14 @@
 #pragma once
-#include <Arduino.h>
-#include <Preferences.h>
+#include <cstdint>
+#include <cstddef>
+#include <cstring>
 #include "../config/constants.h"
 #include "../controllers/grind_session.h"
 
 // Forward declarations
 class WeightSensor;
 class Grinder;
+class Preferences; // forward declare to avoid Arduino dependency in header
 
 // Buffer settings (PSRAM staging area) - Dynamic calculation based on actual timing
 #define MAX_EVENTS_PER_GRIND 50                             // Max discrete events per session (phases, pulses, etc.)
@@ -22,10 +24,10 @@ class Grinder;
 #define EVENT_TEMP_BUFFER_SIZE MAX_EVENTS_PER_GRIND  
 #define MEASUREMENT_TEMP_BUFFER_SIZE MAX_MEASUREMENTS_PER_GRIND
 
-// Flash storage settings
-#define GRIND_SESSIONS_DIR "/sessions"                      // Directory for individual session files
-#define SESSION_FILE_FORMAT "/sessions/session_%lu.bin"    // Individual session file naming format
-#define GRIND_LOG_FILE "/grind_sessions.bin"                // Legacy single-file storage (deprecated)
+// Flash storage settings (with /littlefs mount point for ESP-IDF VFS)
+#define GRIND_SESSIONS_DIR "/littlefs/sessions"                      // Directory for individual session files
+#define SESSION_FILE_FORMAT "/littlefs/sessions/session_%lu.bin"    // Individual session file naming format
+#define GRIND_LOG_FILE "/littlefs/grind_sessions.bin"                // Legacy single-file storage (deprecated)
 #define MAX_STORED_SESSIONS_FLASH 10                        // Maximum sessions to keep in flash (configurable)
 
 #pragma pack(push, 1)

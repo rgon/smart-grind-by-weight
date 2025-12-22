@@ -4,7 +4,7 @@
 #include "../config/constants.h"
 #include "../system/diagnostics_controller.h"
 #include "../system/statistics_manager.h"
-#include <Arduino.h>
+#include "esp_timer.h"
 #include <cstdarg>
 #include <cstring>
 #include <cmath>
@@ -21,6 +21,8 @@
 #define FLASH_OP_QUEUE_SIZE 5
 
 static constexpr float NO_WEIGHT_DELIVERED_THRESHOLD_G = 0.2f;
+
+
 
 void GrindController::init(WeightSensor* lc, Grinder* gr, Preferences* prefs) {
     weight_sensor = lc;
@@ -818,7 +820,7 @@ int GrindController::get_progress_percent() const {
                    : (weight_sensor ? weight_sensor->get_display_weight() : 0.0f);
     if (ground < 0) ground = 0;
     int progress = (int)((ground / target_weight) * 100);
-    return min(progress, 100);
+    return std::min(progress, 100);
 }
 
 float GrindController::get_grind_time() const {

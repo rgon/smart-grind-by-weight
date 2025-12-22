@@ -7,6 +7,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <BLEDevice.h>
+#include "Serial.h"
+#include <esp_clk_tree.h>
+#include <soc/rtc.h>
+#include <cstring>
+#include <cstdio>
 
 OTAHandler::OTAHandler() 
     : ota_in_progress(false)
@@ -31,11 +36,15 @@ void OTAHandler::init(Preferences* prefs) {
     LOG_BLE("OTA: Handler initialized\n");
     
     // Get current firmware build number
-    current_firmware_build_number = String(BUILD_NUMBER);
+    char build_str[16];
+    snprintf(build_str, sizeof(build_str), "%d", BUILD_NUMBER);
+    current_firmware_build_number = String(build_str);
     
     // Log initial power state
+    rtc_cpu_freq_config_t freq;
+    rtc_clk_cpu_freq_get_config(&freq);
     LOG_BLE("OTA Power: Initial state - CPU: %luMHz, Power mode: %s\n",
-                 (unsigned long)getCpuFrequencyMhz(),
+                 (unsigned long)freq.freq_mhz,
                  (power_state == NORMAL_POWER) ? "NORMAL" : "REDUCED");
 }
 
@@ -51,21 +60,23 @@ void OTAHandler::reduce_power_for_ble() {
     if (power_state == BLE_REDUCED_POWER) return;
     
     // Store current CPU frequency
-    normal_cpu_freq_mhz = getCpuFrequencyMhz();
+    rtc_cpu_freq_config_t freq;
+    rtc_clk_cpu_freq_get_config(&freq);
+    normal_cpu_freq_mhz = freq.freq_mhz;
     
     LOG_BLE("OTA Power: Switching from %luMHz to %dMHz\n", 
                  (unsigned long)normal_cpu_freq_mhz, BLE_REDUCED_CPU_FREQ_MHZ);
     
-    // Lower CPU frequency for power savings
-    if (!setCpuFrequencyMhz(BLE_REDUCED_CPU_FREQ_MHZ)) {
-        LOG_BLE("OTA Power: WARNING - Failed to reduce CPU frequency\n");
-    }
+    // Lower CPU frequency for power savings using ESP-IDF API
+    rtc_cpu_freq_config_t new_freq;
+    rtc_clk_cpu_freq_mhz_to_config(BLE_REDUCED_CPU_FREQ_MHZ, &new_freq);
+    rtc_clk_cpu_freq_set_config(&new_freq);
     
     // Verify the frequency change
-    uint32_t actual_freq = getCpuFrequencyMhz();
-    if (actual_freq != BLE_REDUCED_CPU_FREQ_MHZ) {
+    rtc_clk_cpu_freq_get_config(&new_freq);
+    if (new_freq.freq_mhz != BLE_REDUCED_CPU_FREQ_MHZ) {
         LOG_BLE("OTA Power: WARNING - CPU frequency is %luMHz, expected %dMHz\n", 
-                     (unsigned long)actual_freq, BLE_REDUCED_CPU_FREQ_MHZ);
+                     (unsigned long)new_freq.freq_mhz, BLE_REDUCED_CPU_FREQ_MHZ);
     }
     
     power_state = BLE_REDUCED_POWER;
@@ -78,20 +89,17 @@ void OTAHandler::restore_normal_power() {
     LOG_BLE("OTA Power: Restoring CPU to %luMHz\n", 
                  (unsigned long)normal_cpu_freq_mhz);
     
-    // Restore original CPU frequency
-    if (!setCpuFrequencyMhz(normal_cpu_freq_mhz)) {
-        LOG_BLE("OTA Power: WARNING - Failed to restore CPU frequency\n");
-        // Try to set to default frequency as fallback
-        if (!setCpuFrequencyMhz(BLE_NORMAL_CPU_FREQ_MHZ)) {
-            LOG_BLE("OTA Power: ERROR - Failed to set fallback CPU frequency\n");
-        }
-    }
+    // Restore original CPU frequency using ESP-IDF API
+    rtc_cpu_freq_config_t restore_freq;
+    rtc_clk_cpu_freq_mhz_to_config(normal_cpu_freq_mhz, &restore_freq);
+    rtc_clk_cpu_freq_set_config(&restore_freq);
     
     // Verify the frequency change
-    uint32_t actual_freq = getCpuFrequencyMhz();
-    if (actual_freq != normal_cpu_freq_mhz) {
+    rtc_cpu_freq_config_t actual_freq;
+    rtc_clk_cpu_freq_get_config(&actual_freq);
+    if (actual_freq.freq_mhz != normal_cpu_freq_mhz) {
         LOG_BLE("OTA Power: WARNING - CPU frequency is %luMHz, expected %luMHz\n", 
-                     (unsigned long)actual_freq, (unsigned long)normal_cpu_freq_mhz);
+                     (unsigned long)actual_freq.freq_mhz, (unsigned long)normal_cpu_freq_mhz);
     }
     
     power_state = NORMAL_POWER;
@@ -118,14 +126,14 @@ bool OTAHandler::start_ota(uint32_t size, const String& expected_build_number, b
     
     // Store expected build number and firmware version for post-reboot verification
     if (!expected_build_number.isEmpty() && preferences) {
-        preferences->putString("new_build_nr", expected_build_number);
+        preferences->putString("new_build_nr", expected_build_number.c_str());
         LOG_OTA_DEBUG("Stored expected build number: %s\n", expected_build_number.c_str());
     } else {
         LOG_OTA_DEBUG("No expected build number to store\n");
     }
     
     if (!expected_firmware_version.isEmpty() && preferences) {
-        preferences->putString("new_fw_ver", expected_firmware_version);
+        preferences->putString("new_fw_ver", expected_firmware_version.c_str());
         LOG_OTA_DEBUG("Stored expected firmware version: %s\n", expected_firmware_version.c_str());
     } else if (expected_build_number.isEmpty()) {
         LOG_OTA_DEBUG("No expected firmware version to store\n");
@@ -348,24 +356,24 @@ bool OTAHandler::finalize_update() {
     return true;
 }
 
-String OTAHandler::check_ota_failure_after_boot() {
+std::string OTAHandler::check_ota_failure_after_boot() {
     if (!preferences) {
         return "";
     }
 
-    String expected_build = preferences->getString("new_build_nr", "");
-    String expected_version = preferences->getString("new_fw_ver", "");
+    std::string expected_build = preferences->getString("new_build_nr", "");
+    std::string expected_version = preferences->getString("new_fw_ver", "");
 
-    if (expected_build.isEmpty() && expected_version.isEmpty()) {
+    if (expected_build.empty() && expected_version.empty()) {
         return "";
     }
 
     int current_build = BUILD_NUMBER;
-    String current_version = BUILD_FIRMWARE_VERSION;
+    std::string current_version = BUILD_FIRMWARE_VERSION;
 
     // Web flasher sends firmware version - use that for verification (more reliable)
     if (!expected_version.isEmpty()) {
-        if (expected_version != current_version) {
+        if (strcmp(expected_version.c_str(), current_version.c_str()) != 0) {
             LOG_BLE("OTA: Version check failed - expected v%s, got v%s\n",
                          expected_version.c_str(), current_version.c_str());
             preferences->remove("new_build_nr");

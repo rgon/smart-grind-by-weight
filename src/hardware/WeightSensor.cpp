@@ -4,7 +4,9 @@
 #if DEBUG_ENABLE_LOADCELL_MOCK
 #include "mock_hx711_driver.h"
 #endif
-#include <Arduino.h>
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <math.h>
 
 /*
@@ -18,6 +20,8 @@
 // General ADC timing constants
 #define SIGNAL_TIMEOUT 100             // Signal timeout in ms
 #define TARE_TIMEOUT_MS 2000           // Tare operation timeout
+
+
 
 WeightSensor::WeightSensor() {
     // Initialize calibration parameters
@@ -817,7 +821,7 @@ float WeightSensor::get_current_sps() const {
 float WeightSensor::get_standard_deviation_g(uint32_t window_ms) const {
     // Get raw standard deviation and convert to grams
     float raw_std_dev = raw_filter.get_standard_deviation_raw(window_ms);
-    return raw_std_dev / abs(cal_factor);  // Convert from raw ADC units to grams (use abs since noise magnitude is always positive)
+    return raw_std_dev / fabsf(cal_factor);  // Convert from raw ADC units to grams (use fabsf since noise magnitude is always positive)
 }
 
 int32_t WeightSensor::get_standard_deviation_adc(uint32_t window_ms) const {

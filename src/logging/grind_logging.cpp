@@ -1,11 +1,18 @@
 #include "grind_logging.h"
-#include <LittleFS.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <dirent.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <cerrno>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include "../hardware/WeightSensor.h"
 #include "../hardware/grinder.h"
 #include "../config/constants.h"
 #include "../system/statistics_manager.h"
+#include "../utils/littlefs_init.h"
 
 namespace {
 
@@ -337,23 +344,22 @@ uint32_t GrindLogger::count_sessions_in_flash() const {
     uint32_t count = 0;
     
     // Count individual session files (new approach)
-    if (LittleFS.exists(GRIND_SESSIONS_DIR)) {
-        File dir = LittleFS.open(GRIND_SESSIONS_DIR);
-        if (dir && dir.isDirectory()) {
-            File file = dir.openNextFile();
+    if (access(GRIND_SESSIONS_DIR, F_OK) == 0) {
+        DIR* dir = opendir(GRIND_SESSIONS_DIR);
+        if (dir) {
+            struct dirent* entry;
             
-            while (file) {
-                String filename = file.name();
-                // Handle both base names and full paths
-                bool is_session_file = (filename.startsWith("session_") || filename.indexOf("/session_") != -1)
-                                       && filename.endsWith(".bin");
-                if (is_session_file) {
+            while ((entry = readdir(dir)) != nullptr) {
+                const char* filename = entry->d_name;
+                // Check if file starts with "session_" and ends with ".bin"
+                size_t len = strlen(filename);
+                if (len > 12 && strncmp(filename, "session_", 8) == 0 && 
+                    strcmp(filename + len - 4, ".bin") == 0) {
                     count++;
                 }
-                file = dir.openNextFile();
             }
             
-            dir.close();
+            closedir(dir);
         }
     }
     
@@ -364,30 +370,33 @@ uint32_t GrindLogger::count_total_events_in_flash() const {
     uint32_t total_events = 0;
     
     // Count events from individual session files
-    if (LittleFS.exists(GRIND_SESSIONS_DIR)) {
-        File dir = LittleFS.open(GRIND_SESSIONS_DIR);
-        if (dir && dir.isDirectory()) {
-            File file = dir.openNextFile();
+    if (access(GRIND_SESSIONS_DIR, F_OK) == 0) {
+        DIR* dir = opendir(GRIND_SESSIONS_DIR);
+        if (dir) {
+            struct dirent* entry;
             
-            while (file) {
-                String filename = file.name();
-                bool is_session_file = (filename.startsWith("session_") || filename.indexOf("/session_") != -1)
-                                       && filename.endsWith(".bin");
-                if (is_session_file) {
-                    String full_path = filename.startsWith("/") ? filename : (String(GRIND_SESSIONS_DIR) + "/" + filename);
-                    File sessionFile = LittleFS.open(full_path.c_str(), "r");
+            while ((entry = readdir(dir)) != nullptr) {
+                const char* filename = entry->d_name;
+                size_t len = strlen(filename);
+                // Check if file starts with "session_" and ends with ".bin"
+                if (len > 12 && strncmp(filename, "session_", 8) == 0 && 
+                    strcmp(filename + len - 4, ".bin") == 0) {
+                    
+                    char full_path[96];
+                    snprintf(full_path, sizeof(full_path), "%s/%s", GRIND_SESSIONS_DIR, filename);
+                    
+                    FILE* sessionFile = fopen(full_path, "rb");
                     if (sessionFile) {
                         TimeSeriesSessionHeader header;
-                        if (sessionFile.read((uint8_t*)&header, sizeof(header)) == sizeof(header)) {
+                        if (fread(&header, sizeof(header), 1, sessionFile) == 1) {
                             total_events += header.event_count;
                         }
-                        sessionFile.close();
+                        fclose(sessionFile);
                     }
                 }
-                file = dir.openNextFile();
             }
             
-            dir.close();
+            closedir(dir);
         }
     }
     
@@ -398,30 +407,33 @@ uint32_t GrindLogger::count_total_measurements_in_flash() const {
     uint32_t total_measurements = 0;
     
     // Count measurements from individual session files
-    if (LittleFS.exists(GRIND_SESSIONS_DIR)) {
-        File dir = LittleFS.open(GRIND_SESSIONS_DIR);
-        if (dir && dir.isDirectory()) {
-            File file = dir.openNextFile();
+    if (access(GRIND_SESSIONS_DIR, F_OK) == 0) {
+        DIR* dir = opendir(GRIND_SESSIONS_DIR);
+        if (dir) {
+            struct dirent* entry;
             
-            while (file) {
-                String filename = file.name();
-                bool is_session_file = (filename.startsWith("session_") || filename.indexOf("/session_") != -1)
-                                       && filename.endsWith(".bin");
-                if (is_session_file) {
-                    String full_path = filename.startsWith("/") ? filename : (String(GRIND_SESSIONS_DIR) + "/" + filename);
-                    File sessionFile = LittleFS.open(full_path.c_str(), "r");
+            while ((entry = readdir(dir)) != nullptr) {
+                const char* filename = entry->d_name;
+                size_t len = strlen(filename);
+                // Check if file starts with "session_" and ends with ".bin"
+                if (len > 12 && strncmp(filename, "session_", 8) == 0 && 
+                    strcmp(filename + len - 4, ".bin") == 0) {
+                    
+                    char full_path[96];
+                    snprintf(full_path, sizeof(full_path), "%s/%s", GRIND_SESSIONS_DIR, filename);
+                    
+                    FILE* sessionFile = fopen(full_path, "rb");
                     if (sessionFile) {
                         TimeSeriesSessionHeader header;
-                        if (sessionFile.read((uint8_t*)&header, sizeof(header)) == sizeof(header)) {
+                        if (fread(&header, sizeof(header), 1, sessionFile) == 1) {
                             total_measurements += header.measurement_count;
                         }
-                        sessionFile.close();
+                        fclose(sessionFile);
                     }
                 }
-                file = dir.openNextFile();
             }
             
-            dir.close();
+            closedir(dir);
         }
     }
     
@@ -464,7 +476,7 @@ void GrindLogger::initialize_session_config() {
 
 
 bool GrindLogger::write_time_series_session_to_flash(const GrindSession& session, const GrindEvent* events, const GrindMeasurement* measurements) {
-    File file = LittleFS.open(GRIND_LOG_FILE, "a");
+    FILE* file = fopen(GRIND_LOG_FILE, "ab");
     if (!file) {
         LOG_BLE("Failed to open log file for writing\n");
         return false;
@@ -481,12 +493,12 @@ bool GrindLogger::write_time_series_session_to_flash(const GrindSession& session
     header.reserved = 0;
 
     size_t written = 0;
-    written += file.write((uint8_t*)&header, sizeof(TimeSeriesSessionHeader));
-    written += file.write((uint8_t*)&session, sizeof(GrindSession));
-    written += file.write((uint8_t*)events, sizeof(GrindEvent) * event_count);
-    written += file.write((uint8_t*)measurements, sizeof(GrindMeasurement) * measurement_count);
+    written += fwrite(&header, sizeof(TimeSeriesSessionHeader), 1, file) * sizeof(TimeSeriesSessionHeader);
+    written += fwrite(&session, sizeof(GrindSession), 1, file) * sizeof(GrindSession);
+    written += fwrite(events, sizeof(GrindEvent), event_count, file) * sizeof(GrindEvent);
+    written += fwrite(measurements, sizeof(GrindMeasurement), measurement_count, file) * sizeof(GrindMeasurement);
     
-    file.close();
+    fclose(file);
     
     size_t expected = sizeof(TimeSeriesSessionHeader) + header.session_size;
     if (written == expected) {
@@ -517,7 +529,7 @@ static void write_uint16_le(uint8_t*& buffer, uint16_t value) {
 
 void GrindLogger::export_sessions_binary_chunk(uint8_t* buffer, size_t buffer_size,  
                                                uint32_t start_pos, uint32_t* next_pos, size_t* actual_size) {
-    static File export_file;
+    static FILE* export_file = nullptr;
     static uint32_t total_sessions = 0;
     static uint32_t session_idx = 0;
     static uint32_t current_session_id = 0;
@@ -532,7 +544,8 @@ void GrindLogger::export_sessions_binary_chunk(uint8_t* buffer, size_t buffer_si
     // Handle explicit cleanup call (buffer == nullptr or buffer_size == 0)
     if (buffer == nullptr || buffer_size == 0) {
         if (export_file) {
-            export_file.close();
+            fclose(export_file);
+            export_file = nullptr;
             LOG_DEBUG_PRINTLN("Forced closure of export file handle");
         }
         if (session_list) {
@@ -547,7 +560,7 @@ void GrindLogger::export_sessions_binary_chunk(uint8_t* buffer, size_t buffer_si
 
     // Initialize session list on first call
     if (start_pos == 0 || !initialized) {
-        if (export_file) export_file.close();
+        if (export_file) { fclose(export_file); export_file = nullptr; }
         if (session_list) {
             heap_caps_free(session_list);
             session_list = nullptr;
@@ -575,26 +588,24 @@ void GrindLogger::export_sessions_binary_chunk(uint8_t* buffer, size_t buffer_si
             uint32_t list_count = 0;
             
             // Try individual session files first (new approach)
-            if (LittleFS.exists(GRIND_SESSIONS_DIR)) {
-                File dir = LittleFS.open(GRIND_SESSIONS_DIR);
-                if (dir && dir.isDirectory()) {
-                    File file = dir.openNextFile();
-                    while (file && list_count < total_sessions) {
-                        String filename = file.name();
-                        if (filename.startsWith("session_") && filename.endsWith(".bin")) {
-                            // Extract session ID from filename
-                            int start_pos = filename.indexOf('_') + 1;
-                            int end_pos = filename.lastIndexOf('.');
-                            if (start_pos > 0 && end_pos > start_pos) {
-                                uint32_t session_id = filename.substring(start_pos, end_pos).toInt();
+            struct stat st;
+            if (stat(GRIND_SESSIONS_DIR, &st) == 0 && S_ISDIR(st.st_mode)) {
+                DIR* dir = opendir(GRIND_SESSIONS_DIR);
+                if (dir) {
+                    struct dirent* ent;
+                    while ((ent = readdir(dir)) && list_count < total_sessions) {
+                        const char* name = ent->d_name;
+                        if (strncmp(name, "session_", 8) == 0) {
+                            const char* dot = strrchr(name, '.');
+                            if (dot && strcmp(dot, ".bin") == 0) {
+                                uint32_t session_id = static_cast<uint32_t>(strtoul(name + 8, nullptr, 10));
                                 if (session_id > 0 && validate_session_file(session_id)) {
                                     session_list[list_count++] = session_id;
                                 }
                             }
                         }
-                        file = dir.openNextFile();
                     }
-                    dir.close();
+                    closedir(dir);
                 }
             }
             
@@ -620,7 +631,10 @@ void GrindLogger::export_sessions_binary_chunk(uint8_t* buffer, size_t buffer_si
     }
 
     if (session_idx >= total_sessions) {
-        if(export_file) export_file.close();
+        if (export_file) {
+            fclose(export_file);
+            export_file = nullptr;
+        }
         *actual_size = 0;
         *next_pos = 0; // Signal completion
         return;
@@ -631,7 +645,7 @@ void GrindLogger::export_sessions_binary_chunk(uint8_t* buffer, size_t buffer_si
         current_session_id = session_list[session_idx];
         char filename[64];
         snprintf(filename, sizeof(filename), SESSION_FILE_FORMAT, current_session_id);
-        export_file = LittleFS.open(filename, "r");
+        export_file = fopen(filename, "rb");
         if (!export_file) {
             LOG_BLE("ERROR: Failed to open session file: %s\n", filename);
             session_idx++; // Skip this session
@@ -652,8 +666,8 @@ void GrindLogger::export_sessions_binary_chunk(uint8_t* buffer, size_t buffer_si
     
     while (remaining_size > 0 && session_idx < total_sessions) {
         if (!session_header_sent) {
-            if (export_file.read((uint8_t*)&current_header, sizeof(current_header)) != sizeof(current_header) ||
-                export_file.read((uint8_t*)&current_session_data, sizeof(current_session_data)) != sizeof(current_session_data)) {
+            if (fread(&current_header, 1, sizeof(current_header), export_file) != sizeof(current_header) ||
+                fread(&current_session_data, 1, sizeof(current_session_data), export_file) != sizeof(current_session_data)) {
                 break; // Error reading file
             }
             event_idx = 0;
@@ -677,7 +691,7 @@ void GrindLogger::export_sessions_binary_chunk(uint8_t* buffer, size_t buffer_si
 
         // Write events
         while(event_idx < current_header.event_count && remaining_size >= sizeof(GrindEvent)) {
-            export_file.read(p, sizeof(GrindEvent));
+            fread(p, 1, sizeof(GrindEvent), export_file);
             p += sizeof(GrindEvent);
             remaining_size -= sizeof(GrindEvent);
             event_idx++;
@@ -685,7 +699,7 @@ void GrindLogger::export_sessions_binary_chunk(uint8_t* buffer, size_t buffer_si
 
         // Write measurements
         while(measurement_idx < current_header.measurement_count && remaining_size >= sizeof(GrindMeasurement)) {
-            export_file.read(p, sizeof(GrindMeasurement));
+            fread(p, 1, sizeof(GrindMeasurement), export_file);
             p += sizeof(GrindMeasurement);
             remaining_size -= sizeof(GrindMeasurement);
             measurement_idx++;
@@ -699,7 +713,8 @@ void GrindLogger::export_sessions_binary_chunk(uint8_t* buffer, size_t buffer_si
             measurement_idx = 0;
             // Close current session file
             if (export_file) {
-                export_file.close();
+                fclose(export_file);
+                export_file = nullptr;
                 LOG_BLE("Export: Completed session %lu\n", current_session_id);
             }
         } else {
@@ -786,48 +801,38 @@ bool GrindLogger::rotate_flash_log_if_needed() { return true; }
 bool GrindLogger::clear_all_sessions_from_flash() {
     LOG_BLE("Attempting to purge grind history from directory: %s\n", GRIND_SESSIONS_DIR);
  
-    File dir = LittleFS.open(GRIND_SESSIONS_DIR);
-    if (!dir) {
-        LOG_BLE("Directory does not exist. Nothing to clear.");
-        return true; // Not an error, just nothing to do.
-    }
- 
-    if (!dir.isDirectory()) {
-        LOG_BLE("Error: %s is not a directory.\n", GRIND_SESSIONS_DIR);
-        dir.close();
-        return false;
+    struct stat st;
+    if (stat(GRIND_SESSIONS_DIR, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        LOG_BLE("Directory does not exist or is not a directory. Nothing to clear.\n");
+        return true;
     }
  
     bool overall_result = true;
     int files_removed = 0;
     int files_failed = 0;
  
-    File file = dir.openNextFile();
-    while (file) {
-        if (file.isDirectory()) {
-            LOG_BLE("Skipping subdirectory: %s\n", file.path());
-            file = dir.openNextFile();
+    DIR* dir = opendir(GRIND_SESSIONS_DIR);
+    if (!dir) {
+        LOG_BLE("ERROR: Failed to open sessions directory for purge.\n");
+        return false;
+    }
+ 
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        const char* name = ent->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        std::string filePath = std::string(GRIND_SESSIONS_DIR) + "/" + name;
+        LOG_BLE(" - Deleting file: %s\n", filePath.c_str());
+        if (remove(filePath.c_str()) == 0) {
+            files_removed++;
         } else {
-            String filePath = file.path();
-            LOG_BLE(" - Deleting file: %s\n", filePath.c_str());
-            
-            // Close the file handle before attempting deletion
-            file.close();
-            
-            if (LittleFS.remove(filePath)) {
-                files_removed++;
-            } else {
-                LOG_DEBUG_PRINTLN("   -> FAILED");
-                files_failed++;
-                overall_result = false;
-            }
-            
-            // Move to the next file
-            file = dir.openNextFile();
+            LOG_DEBUG_PRINTLN("   -> FAILED");
+            files_failed++;
+            overall_result = false;
         }
     }
  
-    dir.close();
+    closedir(dir);
  
     LOG_DEBUG_PRINTF("Purge complete. Removed: %d, Failed: %d.\n", files_removed, files_failed);
 
@@ -1170,10 +1175,10 @@ void GrindLogger::print_comprehensive_debug() {
 
 bool GrindLogger::ensure_sessions_directory_exists() {
     // Check if directory exists
-    if (!LittleFS.exists(GRIND_SESSIONS_DIR)) {
+    if (access(GRIND_SESSIONS_DIR, F_OK) != 0) {
         LOG_BLE("Creating sessions directory...\n");
-        if (!LittleFS.mkdir(GRIND_SESSIONS_DIR)) {
-            LOG_BLE("ERROR: Failed to create sessions directory\n");
+        if (mkdir(GRIND_SESSIONS_DIR, 0755) != 0) {
+            LOG_BLE("ERROR: Failed to create sessions directory: %s\n", strerror(errno));
             return false;
         }
         LOG_BLE("Sessions directory created successfully\n");
@@ -1185,7 +1190,7 @@ bool GrindLogger::write_individual_session_file(uint32_t session_id, const Grind
     char filename[64];
     snprintf(filename, sizeof(filename), SESSION_FILE_FORMAT, session_id);
     
-    File file = LittleFS.open(filename, "w");
+    FILE* file = fopen(filename, "wb");
     if (!file) {
         LOG_BLE("ERROR: Failed to open session file for writing: %s\n", filename);
         return false;
@@ -1208,18 +1213,25 @@ bool GrindLogger::write_individual_session_file(uint32_t session_id, const Grind
     header.reserved = 0;
     
     // Write header, session, events, and measurements
-    if (file.write((uint8_t*)&header, sizeof(header)) != sizeof(header) ||
-        file.write((uint8_t*)&session, sizeof(session)) != sizeof(session) ||
-        (events_size > 0 && file.write((uint8_t*)events, events_size) != events_size) ||
-        (measurements_size > 0 && file.write((uint8_t*)measurements, measurements_size) != measurements_size)) {
-        
-        file.close();
-        LittleFS.remove(filename); // Clean up partial file
-        LOG_BLE("ERROR: Failed to write session data to file: %s\n", filename);
+    size_t written = 0;
+    written += (fwrite(&header, sizeof(header), 1, file) == 1 ? sizeof(header) : 0);
+    written += (fwrite(&session, sizeof(session), 1, file) == 1 ? sizeof(session) : 0);
+    if (events_size > 0) {
+        written += (fwrite(events, events_size, 1, file) == 1 ? events_size : 0);
+    }
+    if (measurements_size > 0) {
+        written += (fwrite(measurements, measurements_size, 1, file) == 1 ? measurements_size : 0);
+    }
+    
+    fclose(file);
+    
+    size_t expected = sizeof(header) + total_data_size;
+    if (written != expected) {
+        remove(filename); // Clean up partial file
+        LOG_BLE("ERROR: Failed to write session data to file: %s (wrote %zu of %zu bytes)\n", filename, written, expected);
         return false;
     }
     
-    file.close();
     LOG_BLE("Successfully wrote session %lu to file (%zu bytes)\n", session_id, total_data_size + sizeof(header));
     return true;
 }
@@ -1228,29 +1240,29 @@ bool GrindLogger::validate_session_file(uint32_t session_id) {
     char filename[64];
     snprintf(filename, sizeof(filename), SESSION_FILE_FORMAT, session_id);
     
-    if (!LittleFS.exists(filename)) {
+    if (access(filename, F_OK) != 0) {
         return false;
     }
     
-    File file = LittleFS.open(filename, "r");
+    FILE* file = fopen(filename, "rb");
     if (!file) {
         return false;
     }
     
     // Check basic file structure
     TimeSeriesSessionHeader header;
-    if (file.read((uint8_t*)&header, sizeof(header)) != sizeof(header)) {
-        file.close();
+    if (fread(&header, sizeof(header), 1, file) != 1) {
+        fclose(file);
         return false;
     }
     
     // Basic validation: session_id should match filename and file size should be reasonable
     if (header.session_id != session_id || header.session_size == 0 || header.session_size > 100000) {
-        file.close();
+        fclose(file);
         return false;
     }
     
-    file.close();
+    fclose(file);
     return true;
 }
 
@@ -1258,12 +1270,12 @@ bool GrindLogger::remove_session_file(uint32_t session_id) {
     char filename[64];
     snprintf(filename, sizeof(filename), SESSION_FILE_FORMAT, session_id);
     
-    if (LittleFS.exists(filename)) {
-        bool result = LittleFS.remove(filename);
-        if (result) {
+    if (access(filename, F_OK) == 0) {
+        int result = remove(filename);
+        if (result == 0) {
             LOG_BLE("Removed old session file: %lu\n", session_id);
         } else {
-            LOG_BLE("WARNING: Failed to remove session file: %lu\n", session_id);
+            LOG_BLE("WARNING: Failed to remove session file: %lu (%s)\n", session_id, strerror(errno));
         }
         return result;
     }
@@ -1271,20 +1283,27 @@ bool GrindLogger::remove_session_file(uint32_t session_id) {
 }
 
 void GrindLogger::cleanup_old_session_files() {
-    File dir = LittleFS.open(GRIND_SESSIONS_DIR);
-    if (!dir || !dir.isDirectory()) {
+    struct stat st;
+    if (stat(GRIND_SESSIONS_DIR, &st) != 0 || !S_ISDIR(st.st_mode)) {
         LOG_BLE("WARNING: Cannot open sessions directory for cleanup.\n");
         return;
     }
 
-    // Step 1: Count files and collect session IDs
+    // Step 1: Count files
     uint32_t session_count = 0;
-    File file = dir.openNextFile();
-    while (file) {
-        session_count++;
-        file = dir.openNextFile();
+    DIR* dir = opendir(GRIND_SESSIONS_DIR);
+    if (!dir) {
+        LOG_BLE("ERROR: Failed to open sessions directory for cleanup.\n");
+        return;
     }
-    dir.close(); // Close after counting
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        const char* name = ent->d_name;
+        if (strncmp(name, "session_", 8) == 0 && strstr(name, ".bin")) {
+            session_count++;
+        }
+    }
+    closedir(dir);
 
     if (session_count <= MAX_STORED_SESSIONS_FLASH) {
         return; // No cleanup needed
@@ -1292,32 +1311,31 @@ void GrindLogger::cleanup_old_session_files() {
 
     LOG_BLE("Session count (%lu) exceeds limit (%d). Cleaning up old files...\n", session_count, MAX_STORED_SESSIONS_FLASH);
 
-    // Step 2: Create a list of session IDs
+    // Step 2: Collect session IDs
     uint32_t* session_ids = (uint32_t*)malloc(session_count * sizeof(uint32_t));
     if (!session_ids) {
         LOG_BLE("ERROR: Failed to allocate memory for session ID list during cleanup.\n");
         return;
     }
 
-    dir = LittleFS.open(GRIND_SESSIONS_DIR);
+    dir = opendir(GRIND_SESSIONS_DIR);
     uint32_t list_idx = 0;
-    file = dir.openNextFile();
-    while (file && list_idx < session_count) {
-        String filename = file.name();
-        int start_pos = filename.indexOf('_') + 1;
-        int end_pos = filename.lastIndexOf('.');
-        if (start_pos > 0 && end_pos > start_pos) {
-            session_ids[list_idx++] = filename.substring(start_pos, end_pos).toInt();
+    while ((ent = readdir(dir)) != nullptr && list_idx < session_count) {
+        const char* name = ent->d_name;
+        if (strncmp(name, "session_", 8) == 0) {
+            const char* dot = strrchr(name, '.');
+            if (dot && strcmp(dot, ".bin") == 0) {
+                session_ids[list_idx++] = static_cast<uint32_t>(strtoul(name + 8, nullptr, 10));
+            }
         }
-        file = dir.openNextFile();
     }
-    dir.close();
+    closedir(dir);
 
-    // Step 3: Sort the session IDs in ascending order
-    std::sort(session_ids, session_ids + session_count);
+    // Step 3: Sort ascending
+    std::sort(session_ids, session_ids + list_idx);
 
-    // Step 4: Remove the oldest files
-    uint32_t files_to_remove = session_count - MAX_STORED_SESSIONS_FLASH;
+    // Step 4: Remove oldest
+    uint32_t files_to_remove = list_idx - MAX_STORED_SESSIONS_FLASH;
     for (uint32_t i = 0; i < files_to_remove; i++) {
         remove_session_file(session_ids[i]);
     }

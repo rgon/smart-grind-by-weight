@@ -3,9 +3,8 @@
 #include "esp_log.h"
 #include <cstdio>
 
-// Forward declaration to avoid circular dependency
-class BluetoothManager;
-extern BluetoothManager g_bluetooth_manager;
+// Note: BLE logging bridge removed during ESP-IDF migration.
+// Avoid referencing BluetoothManager from logging to keep modules decoupled.
 
 
 /**
@@ -35,6 +34,18 @@ extern BluetoothManager g_bluetooth_manager;
 #define LOG_LOADCELL_DEBUG(format, ...) ESP_LOGD("LOADCELL", format, ##__VA_ARGS__)
 #else
 #define LOG_LOADCELL_DEBUG(format, ...)
+#endif
+
+#if DEBUG_CALIBRATION
+#define LOG_CALIBRATION_DEBUG(format, ...) ESP_LOGD("CALIB", format, ##__VA_ARGS__)
+#else
+#define LOG_CALIBRATION_DEBUG(format, ...)
+#endif
+
+#if DEBUG_WEIGHT_SETTLING
+#define LOG_SETTLING_DEBUG(format, ...) ESP_LOGD("SETTLING", format, ##__VA_ARGS__)
+#else
+#define LOG_SETTLING_DEBUG(format, ...)
 #endif
 
 #if DEBUG_UI_SYSTEM

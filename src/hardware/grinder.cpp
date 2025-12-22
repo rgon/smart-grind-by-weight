@@ -4,6 +4,10 @@
 #if DEBUG_ENABLE_LOADCELL_MOCK
 #include "mock_hx711_driver.h"
 #endif
+#include "esp_timer.h"
+#include "driver/gpio.h"
+
+
 
 void Grinder::init(int pin) {
     motor_pin = pin;
@@ -44,7 +48,7 @@ void Grinder::start() {
     MockHX711Driver::notify_grinder_start();
     pulse_active = false;
     grinding = true;
-    motor_start_time = millis();
+    motor_start_time = static_cast<unsigned long>(esp_timer_get_time() / 1000ULL);
     emit_background_change(true);
     return;
 #endif
@@ -52,7 +56,7 @@ void Grinder::start() {
 
     // Reset any active pulse state when using continuous mode
     pulse_active = false;
-    motor_start_time = millis();
+    motor_start_time = static_cast<unsigned long>(esp_timer_get_time() / 1000ULL);
     
     // Clean up any existing encoder
     if (current_encoder) {
@@ -195,7 +199,7 @@ bool Grinder::is_pulse_complete() {
     // For simplicity, we'll use a transmission done callback approach
     // Since RMT handles the pulse timing in hardware, we can check the GPIO state
     // as a simple completion indicator
-    if (digitalRead(motor_pin) == LOW) {
+    if (gpio_get_level((gpio_num_t)motor_pin) == 0) {
         pulse_active = false;
         grinding = false;
         emit_background_change(false);
@@ -210,7 +214,8 @@ bool Grinder::is_motor_settled() const {
     if (motor_start_time == 0) {
         return false;  // Motor has never started
     }
-    return (millis() - motor_start_time) >= HW_GRINDER_SETTLING_TIME_MS;
+    unsigned long now_ms = static_cast<unsigned long>(esp_timer_get_time() / 1000ULL);
+    return (now_ms - motor_start_time) >= HW_GRINDER_SETTLING_TIME_MS;
 }
 
 void Grinder::set_ui_event_callback(const std::function<void(const GrindEventData&)>& callback) {

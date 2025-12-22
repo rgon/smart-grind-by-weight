@@ -1,7 +1,5 @@
 #include "profile_controller.h"
-#include <Arduino.h>
 #include <string.h>
-#include <Preferences.h>
 
 void ProfileController::init(Preferences* prefs) {
     preferences = prefs;

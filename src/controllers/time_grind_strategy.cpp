@@ -2,7 +2,7 @@
 #include "../config/constants.h"
 #include "grind_controller.h"
 #include "../logging/grind_logging.h"
-#include <Arduino.h>
+#include "esp_timer.h"
 
 void TimeGrindStrategy::on_enter(const GrindSessionDescriptor&,
                                  GrindStrategyContext& context,
@@ -33,7 +33,7 @@ bool TimeGrindStrategy::update(const GrindSessionDescriptor& session,
                 return true;
             }
 
-            unsigned long elapsed = loop_data.now - controller->time_grind_start_ms;
+            unsigned long elapsed = static_cast<unsigned long>(esp_timer_get_time() / 1000ULL) - controller->time_grind_start_ms;
             if (elapsed >= controller->target_time_ms) {
                 controller->grinder->stop();
                 controller->switch_phase(GrindPhase::FINAL_SETTLING, loop_data);
@@ -61,7 +61,7 @@ int TimeGrindStrategy::progress_percent(const GrindSessionDescriptor& session,
         return 0;
     }
 
-    unsigned long elapsed = millis() - controller.time_grind_start_ms;
+    unsigned long elapsed = static_cast<unsigned long>(esp_timer_get_time() / 1000ULL) - controller.time_grind_start_ms;
     if (elapsed >= session.target_time_ms) {
         return 100;
     }

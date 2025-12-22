@@ -1,11 +1,13 @@
 #include "manager.h"
 #include <algorithm>
 #include <cstdarg>
-#include <Arduino.h>
 #include <esp_system.h>
-#include <LittleFS.h>
 #include <nvs_flash.h>
 #include <nvs.h>
+#include "ESP.h"
+#include "Serial.h"
+#include "File.h"
+#include "LittleFS.h"
 #include "../system/performance_monitor.h"
 #include "../system/statistics_manager.h"
 #include "../system/diagnostics_controller.h"
@@ -258,7 +260,6 @@ void BluetoothManager::enable(unsigned long timeout_ms) {
     advertising->setMinPreferred(0x12);
     
     // Set advertised name in both advertising data and scan response data
-    advertising->setName(BLE_DEVICE_NAME);
     BLEAdvertisementData adv;
     adv.setName(BLE_DEVICE_NAME);
     advertising->setAdvertisementData(adv);

@@ -4,6 +4,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_timer.h>
+#include "../utils/time_utils.h"
+
+
 
 namespace {
 constexpr uint32_t kTouchI2CFrequencyHz = 300000;

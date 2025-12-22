@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "Serial.h"
+
 void style_as_button(lv_obj_t* object, int32_t width, int32_t height, const lv_font_t* font) {
     lv_obj_set_style_radius(object, THEME_CORNER_RADIUS_PX, 0);
     lv_obj_set_style_bg_opa(object, LV_OPA_COVER, 0);

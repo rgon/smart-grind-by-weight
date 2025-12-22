@@ -1,7 +1,14 @@
 #include "hx711_driver.h"
 #include "../config/constants.h"
-#include <Arduino.h>
 #include <driver/gpio.h>
+#include <esp_timer.h>
+#include <esp_rom_sys.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/portmacro.h>
+#include "../utils/time_utils.h"
+
+
 
 /**
  * HX711 Driver Implementation
@@ -33,23 +40,24 @@ bool HX711Driver::begin(uint8_t gain_value) {
     // GPIO 2 is a strapping pin that needs explicit configuration
     gpio_reset_pin((gpio_num_t)sck_pin);
     gpio_reset_pin((gpio_num_t)dout_pin);
-    
-    pinMode(sck_pin, OUTPUT);
-    pinMode(dout_pin, INPUT_PULLDOWN);
+
+    gpio_set_direction((gpio_num_t)sck_pin, GPIO_MODE_OUTPUT);
+    gpio_set_direction((gpio_num_t)dout_pin, GPIO_MODE_INPUT);
+    gpio_set_pull_mode((gpio_num_t)dout_pin, GPIO_PULLDOWN_ONLY);
     set_gain(gain_value);
     power_up();
     
     // Wait for HX711 to stabilize - use sample rate appropriate delay
     uint32_t sample_interval_ms = HW_LOADCELL_SAMPLE_INTERVAL_MS;
-    delay(sample_interval_ms * 2); // Wait 2 sample intervals for stabilization
+    vTaskDelay(pdMS_TO_TICKS(sample_interval_ms * 2)); // Wait 2 sample intervals for stabilization
     
     // Initial conversion to establish communication - use dynamic timeout
     uint32_t comm_timeout = sample_interval_ms * 2 + 200; // 2 sample intervals + margin
     LOG_BLE("HX711Driver: Waiting for first sample (timeout: %lums)\n", comm_timeout);
     
-    unsigned long start_time = millis();
+    unsigned long start_time = (unsigned long)(esp_timer_get_time() / 1000);
     while (!data_waiting_async() && millis() - start_time < comm_timeout) {
-        delay(sample_interval_ms / 4); // Poll at 4x the sample rate
+        vTaskDelay(pdMS_TO_TICKS(sample_interval_ms / 4)); // Poll at 4x the sample rate
     }
     
     if (data_waiting_async()) {
@@ -60,8 +68,8 @@ bool HX711Driver::begin(uint8_t gain_value) {
 
         // After a successful read the HX711 should release DOUT HIGH until the next conversion.
         // If it remains LOW we likely don't have a real HX711 connected (pulldown holding the line).
-        delayMicroseconds(10);
-        if (digitalRead(dout_pin) == LOW) {
+        esp_rom_delay_us(10);
+        if (gpio_get_level((gpio_num_t)dout_pin) == 0) {
             LOG_BLE("HX711Driver: DOUT stuck LOW after first read - HX711 not connected?\n");
             return false;
         }
@@ -95,21 +103,21 @@ void HX711Driver::power_down() {
 
 void HX711Driver::power_up_sequence() {
     // Ensure SCK is configured as GPIO output before toggling (may be called before begin())
-    pinMode(sck_pin, OUTPUT);
-    digitalWrite(sck_pin, LOW);
-    delayMicroseconds(100);  // Ensure clean power up
+    gpio_set_direction((gpio_num_t)sck_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)sck_pin, 0);
+    esp_rom_delay_us(100);  // Ensure clean power up
 }
 
 void HX711Driver::power_down_sequence() {
     // Ensure SCK is configured as GPIO output before toggling (may be called before begin())
-    pinMode(sck_pin, OUTPUT);
-    digitalWrite(sck_pin, LOW);
-    digitalWrite(sck_pin, HIGH);
-    delayMicroseconds(100);  // Hold high for >60μs to enter power down
+    gpio_set_direction((gpio_num_t)sck_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)sck_pin, 0);
+    gpio_set_level((gpio_num_t)sck_pin, 1);
+    esp_rom_delay_us(100);  // Hold high for >60μs to enter power down
 }
 
 bool HX711Driver::is_ready() {
-    return digitalRead(dout_pin) == LOW;
+    return gpio_get_level((gpio_num_t)dout_pin) == 0;
 }
 
 bool HX711Driver::data_waiting_async() {
@@ -125,35 +133,38 @@ bool HX711Driver::update_async() {
     return true;
 }
 
+// Use a spinlock to guard critical timing section instead of disabling all interrupts
+static portMUX_TYPE s_hx711_spinlock = portMUX_INITIALIZER_UNLOCKED;
+
 void HX711Driver::conversion_24bit() {
     // Record conversion timing
-    unsigned long now = micros();
+    uint64_t now = esp_timer_get_time();
     if (conversion_start_time == 0) {
         conversion_time = 0;
     } else {
-        conversion_time = now - conversion_start_time;
+        conversion_time = (unsigned long)(now - conversion_start_time);
     }
-    conversion_start_time = now;
+    conversion_start_time = (unsigned long)now;
     
     uint32_t raw_data = 0;  // Use explicit 32-bit unsigned for ESP32 consistency
     
     // HX711_ADC interrupt protection: Disable interrupts during critical bit-bang conversion
     // This prevents BLE and other interrupts from disrupting the precise HX711 timing
-    noInterrupts();
+    portENTER_CRITICAL(&s_hx711_spinlock);
     
     // Read 24 bits of data + gain bits
     for (uint8_t i = 0; i < (24 + gain); i++) {
-        digitalWrite(sck_pin, HIGH);
-        if (SCK_DELAY) delayMicroseconds(1);
-        digitalWrite(sck_pin, LOW);
+        gpio_set_level((gpio_num_t)sck_pin, 1);
+        if (SCK_DELAY) esp_rom_delay_us(1);
+        gpio_set_level((gpio_num_t)sck_pin, 0);
         
         if (i < 24) {
-            raw_data = (raw_data << 1) | digitalRead(dout_pin);
+            raw_data = (raw_data << 1) | (uint32_t)gpio_get_level((gpio_num_t)dout_pin);
         }
     }
     
     // Re-enable interrupts immediately after conversion
-    interrupts();
+    portEXIT_CRITICAL(&s_hx711_spinlock);
     
     // HX711_ADC exact data processing: normalize HX711's offset binary output
     // HX711 natural range: 0x800000 to 0x7FFFFF
@@ -184,7 +195,7 @@ bool HX711Driver::validate_hardware() {
     LOG_BLE("HX711Driver: Hardware validation timeout = %lums (sample rate: %d SPS)\n", 
            validation_timeout, HW_LOADCELL_SAMPLE_RATE_SPS);
     
-    unsigned long start_time = millis();
+    unsigned long start_time = (unsigned long)(esp_timer_get_time() / 1000);
     uint64_t conversion_time_sum = 0;
     int conversion_time_samples = 0;
     int successful_reads = 0;
@@ -200,7 +211,7 @@ bool HX711Driver::validate_hardware() {
                 LOG_BLE("HX711Driver: Validation read %d/3 successful\n", successful_reads);
             }
         }
-        delay(sample_interval_ms / 4); // Poll at 4x the sample rate
+        vTaskDelay(pdMS_TO_TICKS(sample_interval_ms / 4)); // Poll at 4x the sample rate
     }
     
     if (conversion_time_samples > 0) {
@@ -213,7 +224,7 @@ bool HX711Driver::validate_hardware() {
     }
     
     LOG_BLE("HX711Driver: Hardware validation completed - %d/3 successful reads in %lums (rate ≈ %.1f SPS)\n", 
-           successful_reads, millis() - start_time, estimated_sample_rate_sps);
+           successful_reads, (unsigned long)(esp_timer_get_time() / 1000 - start_time), estimated_sample_rate_sps);
     
     return successful_reads >= 3;
 }

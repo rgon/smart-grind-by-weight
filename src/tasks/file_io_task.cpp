@@ -1,9 +1,15 @@
 #include "file_io_task.h"
 #include "../logging/grind_logging.h"
-#include "../config/constants.h"
-#include <Arduino.h>
-#include <LittleFS.h>
-#include <Preferences.h>
+#include "../config/logging.h"
+#include "../utils/littlefs_init.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_log.h>
 
 // Global instance
 FileIOTask file_io_task;
@@ -50,9 +56,9 @@ void FileIOTask::init(QueueHandle_t io_queue) {
     file_io_queue = io_queue;
     
     // Check initial filesystem availability
-    filesystem_available = LittleFS.begin(true);
+    filesystem_available = littlefs_init();
     if (filesystem_available) {
-        LOG_BLE("FileIOTask: LittleFS filesystem available\n");
+        LOG_BLE("FileIOTask: LittleFS filesystem available at /littlefs\n");
     } else {
         LOG_BLE("FileIOTask: LittleFS filesystem unavailable\n");
     }
@@ -296,11 +302,11 @@ void FileIOTask::check_filesystem_health() {
 
 bool FileIOTask::validate_filesystem_access() {
     // Try a simple filesystem operation to validate access
-    File test_file = LittleFS.open("/test_access", "w");
+    FILE* test_file = fopen("/littlefs/test_access", "w");
     if (test_file) {
-        test_file.println("test");
-        test_file.close();
-        LittleFS.remove("/test_access");
+        fprintf(test_file, "test");
+        fclose(test_file);
+        remove("/littlefs/test_access");
         return true;
     }
     return false;
@@ -329,16 +335,20 @@ void FileIOTask::handle_filesystem_error() {
 bool FileIOTask::attempt_filesystem_recovery() {
     LOG_BLE("FileIOTask: Attempting filesystem recovery...\n");
     
-    // Try to remount the filesystem
-    LittleFS.end();
+    // Try to reinitialize the filesystem
     vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second
     
-    bool recovery_success = LittleFS.begin(true);
-    if (recovery_success) {
+    // Check if filesystem is still responsive
+    FILE* test = fopen("/littlefs/recovery_test", "w");
+    if (test) {
+        fclose(test);
+        remove("/littlefs/recovery_test");
         filesystem_available = true;
+        return true;
     }
     
-    return recovery_success;
+    filesystem_available = false;
+    return false;
 }
 
 void FileIOTask::log_operation_failure(FileIOOperationType type, const char* details) {

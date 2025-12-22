@@ -1,5 +1,4 @@
 #include "grinding_screen_arc.h"
-#include <Arduino.h>
 #include "../../config/constants.h"
 
 void GrindingScreenArc::create() {

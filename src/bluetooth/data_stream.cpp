@@ -1,8 +1,13 @@
+// Migrated from Arduino LittleFS to ESP-IDF VFS + POSIX
 #include "data_stream.h"
 #include "../logging/grind_logging.h"
 #include "../config/constants.h"
-#include <Arduino.h>
-#include <LittleFS.h>
+#include <cstdio>
+#include <cstring>
+#include <dirent.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <esp_heap_caps.h>
 
 extern GrindLogger grind_logger;
 
@@ -26,7 +31,8 @@ void DataStreamManager::close_stream() {
         LOG_BLE("DataStream: Closing file stream\n");
     }
     if (active_file) {
-        active_file.close();
+        fclose(active_file);
+        active_file = nullptr;
     }
     file_stream_active = false;
     current_session_id = 0;
@@ -50,28 +56,32 @@ uint32_t DataStreamManager::get_session_list(uint32_t* session_ids, uint32_t max
     uint32_t list_count = 0;
     
     // Try individual session files first (new approach)
-    if (LittleFS.exists(GRIND_SESSIONS_DIR)) {
-        File dir = LittleFS.open(GRIND_SESSIONS_DIR);
-        if (dir && dir.isDirectory()) {
-            File file = dir.openNextFile();
-            while (file && list_count < total_sessions) {
-                String filename = file.name();
-                bool is_session_file = (filename.startsWith("session_") || filename.indexOf("/session_") != -1)
-                                       && filename.endsWith(".bin");
+    if (access(GRIND_SESSIONS_DIR, F_OK) == 0) {
+        DIR* dir = opendir(GRIND_SESSIONS_DIR);
+        if (dir) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != nullptr && list_count < total_sessions) {
+                const char* fname = entry->d_name;
+                size_t len = strlen(fname);
+                bool is_session_file = (len > 12 && strncmp(fname, "session_", 8) == 0 && strcmp(fname + len - 4, ".bin") == 0);
                 if (is_session_file) {
-                    // Extract session ID from filename
-                    int start_pos = filename.indexOf('_') + 1;
-                    int end_pos = filename.lastIndexOf('.');
-                    if (start_pos > 0 && end_pos > start_pos) {
-                        uint32_t session_id = filename.substring(start_pos, end_pos).toInt();
-                        if (session_id > 0) {
-                            session_list[list_count++] = session_id;
+                    // Extract numeric ID between '_' and '.'
+                    const char* underscore = strchr(fname, '_');
+                    const char* dot = strrchr(fname, '.');
+                    if (underscore && dot && underscore < dot) {
+                        char idbuf[16] = {0};
+                        size_t idlen = (size_t)(dot - underscore - 1);
+                        if (idlen < sizeof(idbuf)) {
+                            memcpy(idbuf, underscore + 1, idlen);
+                            uint32_t sid = (uint32_t)strtoul(idbuf, nullptr, 10);
+                            if (sid > 0) {
+                                session_list[list_count++] = sid;
+                            }
                         }
                     }
                 }
-                file = dir.openNextFile();
             }
-            dir.close();
+            closedir(dir);
         }
     }
     
@@ -108,18 +118,27 @@ bool DataStreamManager::initialize_file_stream(uint32_t session_id) {
     char filename[64];
     snprintf(filename, sizeof(filename), SESSION_FILE_FORMAT, session_id);
 
-    if (!LittleFS.exists(filename)) {
+    if (access(filename, F_OK) != 0) {
         LOG_BLE("ERROR: Session file %s does not exist\n", filename);
         return false;
     }
 
-    active_file = LittleFS.open(filename, "r");
+    active_file = fopen(filename, "rb");
     if (!active_file) {
         LOG_BLE("ERROR: Failed to open session file %s\n", filename);
         return false;
     }
 
-    file_total_size = active_file.size();
+    // Determine file size
+    if (fseek(active_file, 0L, SEEK_END) != 0) {
+        fclose(active_file);
+        active_file = nullptr;
+        return false;
+    }
+    long sz = ftell(active_file);
+    if (sz < 0) sz = 0;
+    file_total_size = (uint32_t)sz;
+    fseek(active_file, 0L, SEEK_SET);
     LOG_BLE("DataStream: Initialized file stream for session %lu (%lu bytes)\n", session_id, file_total_size);
     file_stream_active = true;
     return true;
@@ -137,16 +156,17 @@ bool DataStreamManager::read_file_chunk(uint8_t* buffer, size_t buffer_size, siz
     }
 
     // Read next chunk at current file position
-    size_t bytes_read = active_file.read(buffer, buffer_size);
+    size_t bytes_read = fread(buffer, 1, buffer_size, active_file);
 
     if (bytes_read > 0) {
         file_bytes_sent += bytes_read;
         *actual_size = bytes_read;
 
         // Check if file is complete
-        if (file_bytes_sent >= file_total_size) {
+        if (file_bytes_sent >= file_total_size || feof(active_file)) {
             LOG_BLE("DataStream: Completed file stream for session %lu\n", current_session_id);
-            active_file.close();
+            fclose(active_file);
+            active_file = nullptr;
             file_stream_active = false;
         }
 
@@ -155,7 +175,8 @@ bool DataStreamManager::read_file_chunk(uint8_t* buffer, size_t buffer_size, siz
 
     // No more data
     LOG_BLE("DataStream: End of file stream for session %lu\n", current_session_id);
-    active_file.close();
+    fclose(active_file);
+    active_file = nullptr;
     file_stream_active = false;
     return false;
 }

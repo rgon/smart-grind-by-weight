@@ -1,8 +1,9 @@
 #include "menu_controller.h"
 
-#include <Arduino.h>
-#include <LittleFS.h>
-#include <Preferences.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_timer.h>
+#include "../../system/Preferences.h"
 #include <esp_err.h>
 #include <esp_system.h>
 #include <nvs_flash.h>
@@ -71,8 +72,8 @@ void MenuUIController::update() {
     }
 
     WeightSensor* sensor = ui_manager_->hardware_manager->get_weight_sensor();
-    unsigned long uptime_ms = millis();
-    size_t free_heap = ESP.getFreeHeap();
+    unsigned long uptime_ms = (unsigned long)(esp_timer_get_time() / 1000ULL);
+    size_t free_heap = esp_get_free_heap_size();
 
     ui_manager_->menu_screen.update_info(sensor, uptime_ms, free_heap);
     ui_manager_->menu_screen.update_diagnostics(sensor);
@@ -576,7 +577,7 @@ void MenuUIController::perform_factory_reset() {
                          static_cast<int>(erase_result));
     }
 
-    delay(100);
+    vTaskDelay(pdMS_TO_TICKS(100));
     esp_restart();
 }
 

@@ -1,6 +1,5 @@
 #include "calibration_controller.h"
 
-#include <Arduino.h>
 #include <limits>
 #include "../../config/constants.h"
 #include "../../system/diagnostics_controller.h"

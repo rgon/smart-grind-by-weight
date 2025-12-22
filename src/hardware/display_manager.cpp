@@ -1,10 +1,25 @@
 #include "display_manager.h"
 #include "../config/constants.h"
 #include "../config/logging.h"
-#include <Arduino.h>
-#include <esp_heap_caps.h>
-#include <algorithm>
+#include <cstddef>
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_vendor.h"
+#include "esp_lcd_panel_ops.h"
+#include "driver/spi_master.h"
+#include "driver/gpio.h"
+#include "driver/ledc.h"
 #include <cstring>
+
+// Fallback for ESP-IDF versions that don't expose vendor init command helper
+#if !defined(ESP_LCD_PANEL_VENDOR_INIT_CMD_T_DEFINED)
+typedef struct {
+    int cmd;                // LCD command opcode
+    const void *data;       // Command parameters
+    size_t data_bytes;      // Length of parameters
+    unsigned int delay_ms;  // Post-command delay
+} esp_lcd_panel_vendor_init_cmd_t;
+#define ESP_LCD_PANEL_VENDOR_INIT_CMD_T_DEFINED 1
+#endif
 
 DisplayManager* g_display_manager = nullptr;
 
@@ -17,68 +32,69 @@ void DisplayManager::init() {
     // Initialize display hardware
     init_display_hardware(config);
     
-    if (!gfx_device || !gfx_device->begin()) {
+    if (!lcd_panel) {
+        LOG_BLE("[DISPLAY] ERROR: Failed to initialize LCD panel\n");
         return;
     }
     
-    gfx_device->fillScreen(RGB565_BLACK);
+    // Initialize the LCD panel
+    ESP_ERROR_CHECK(esp_lcd_panel_init(lcd_panel));
     
-    // Initialize LVGL
-    lv_init();
-    lv_tick_set_cb(millis_cb);
-    
-    screen_width = gfx_device->width();
-    screen_height = gfx_device->height();
+    screen_width = config.width;
+    screen_height = config.height;
 
-    // Full screen buffer, but only partial updates used
-    // RGB565 format (16bit per pixel)
-    draw_buffer = nullptr;
-    dma_staging_buffer = nullptr;
-    dma_staging_rows = 16;
+    // Initialize LVGL port
+    const lvgl_port_cfg_t lvgl_cfg = {
+        .task_priority = 4,
+        .task_stack = 6144,
+        .task_affinity = -1,
+        .task_max_sleep_ms = 500,
+        .timer_period_ms = 5
+    };
+    ESP_ERROR_CHECK(lvgl_port_init(&lvgl_cfg));
 
-    const size_t draw_rows = 40; // 280 * 40 * 2 = 22,400 bytes
-    buffer_size = screen_width * draw_rows * sizeof(uint16_t);
+    // Calculate buffer size (partial buffer for rendering)
+    uint32_t buff_size = screen_width * 40; // 40 lines buffer
 
-    draw_buffer = static_cast<lv_color_t*>(
-        heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN,
-                                buffer_size,
-                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-
-    if (!draw_buffer) {
-        draw_buffer = static_cast<lv_color_t*>(
-            heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN,
-                                    buffer_size,
-                                    MALLOC_CAP_8BIT));
-    }
-
-    if (!draw_buffer) {
-        LOG_BLE("[DISPLAY] ERROR: Failed to allocate LVGL draw buffer\n");
-        return;
-    }
-
-    while (dma_staging_rows >= 4 && dma_staging_buffer == nullptr) {
-        dma_staging_buffer = static_cast<uint16_t*>(
-            heap_caps_aligned_alloc(LV_DRAW_BUF_ALIGN,
-                                    screen_width * dma_staging_rows * sizeof(uint16_t),
-                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
-        if (!dma_staging_buffer) {
-            dma_staging_rows /= 2;
+    // Add LCD display to LVGL
+    const lvgl_port_display_cfg_t disp_cfg = {
+        .io_handle = nullptr,
+        .panel_handle = lcd_panel,
+        .control_handle = nullptr,
+        .buffer_size = buff_size,
+        .double_buffer = true,
+        .trans_size = 0,
+        .hres = screen_width,
+        .vres = screen_height,
+        .monochrome = false,
+        .rotation = {
+            .swap_xy = false,
+            .mirror_x = false,
+            .mirror_y = false,
+        },
+#if LVGL_VERSION_MAJOR >= 9
+        .color_format = LV_COLOR_FORMAT_RGB565,
+#endif
+        .flags = {
+            .buff_dma = false,
+            .buff_spiram = true,
+            .sw_rotate = false,
+#if LVGL_VERSION_MAJOR >= 9
+            .swap_bytes = false,
+#endif
+            .full_refresh = 0,
+            .direct_mode = 0,
         }
-    }
-
-    if (!dma_staging_buffer) {
-        LOG_BLE("[DISPLAY] ERROR: Failed to allocate DMA staging buffer\n");
-        heap_caps_free(draw_buffer);
-        draw_buffer = nullptr;
-        return;
-    }
-
-    lvgl_display = lv_display_create(screen_width, screen_height);
-    lv_display_set_flush_cb(lvgl_display, display_flush_cb);
-    lv_display_set_buffers(lvgl_display, draw_buffer, NULL,
-                          buffer_size , LV_DISPLAY_RENDER_MODE_PARTIAL);
-
-    lv_display_add_event_cb(lvgl_display, display_rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+    };
+    
+    const lvgl_port_display_rgb_cfg_t rgb_cfg = {
+        .flags = {
+            .bb_mode = true,  // Bounce buffer mode
+            .avoid_tearing = true,
+        }
+    };
+    
+    lvgl_display = lvgl_port_add_disp_rgb(&disp_cfg, &rgb_cfg);
     
     if (config.is_round) {
         lv_obj_set_style_clip_corner(lv_scr_act(), true, 0);
@@ -96,91 +112,182 @@ void DisplayManager::init() {
 void DisplayManager::init_display_hardware(const DisplayConfig& config) {
     switch (config.interface) {
         case DisplayInterfaceType::QSPI:
-            init_qspi_display(config);
+            LOG_BLE("[DISPLAY] ERROR: QSPI display interface not implemented\n");
+            lcd_panel = nullptr;
             break;
         case DisplayInterfaceType::MIPI_PARALLEL:
-            init_mipi_parallel_display(config);
+            init_rgb_display(config);
             break;
-        // Add more as needed
     }
 }
 
-void DisplayManager::init_qspi_display(const DisplayConfig& config) {
-    bus = new Arduino_ESP32QSPI(
-        config.pins.cs, config.pins.sck, 
-        config.pins.d0, config.pins.d1, 
-        config.pins.d2, config.pins.d3
-    );
-    
-    if (strcmp(config.driver_name, "CO5300") == 0) {
-        gfx_device = new Arduino_CO5300(
-            bus, config.pins.rst, config.rotation, 
-            config.width, config.height,
-            config.color_order, config.offset_x,
-            config.ips_invert_x, config.ips_invert_y
-        );
+void DisplayManager::init_rgb_display(const DisplayConfig& config) {
+    // ST7701 requires vendor-specific initialization via 3-wire SPI before RGB panel
+    if (strcmp(config.driver_name, "ST7701") == 0) {
+        esp_err_t ret = init_st7701_commands(config);
+        if (ret != ESP_OK) {
+            LOG_BLE("[DISPLAY] ERROR: ST7701 initialization failed\n");
+            lcd_panel = nullptr;
+            return;
+        }
     }
-    // Add more QSPI drivers as needed
+    
+    // Configure RGB panel timing based on display profile
+    esp_lcd_rgb_panel_config_t panel_conf = {
+        .clk_src = LCD_CLK_SRC_DEFAULT,
+        .timings = {
+            .pclk_hz = 16 * 1000 * 1000,  // 16 MHz for UEDX48480021
+            .h_res = config.width,
+            .v_res = config.height,
+            .hsync_pulse_width = 8,
+            .hsync_back_porch = 20,
+            .hsync_front_porch = 40,
+            .vsync_pulse_width = 8,
+            .vsync_back_porch = 20,
+            .vsync_front_porch = 50,
+            .flags = {
+                .hsync_idle_low = 0,
+                .vsync_idle_low = 0,
+                .de_idle_high = 0,
+                .pclk_active_neg = false,
+                .pclk_idle_high = 0,
+            },
+        },
+        .data_width = 16,
+        .bits_per_pixel = 16,
+        .num_fbs = 1,
+        .bounce_buffer_size_px = config.width * 10,
+        .sram_trans_align = 0,
+        .dma_burst_size = 64,
+        .hsync_gpio_num = config.pins.hsync,
+        .vsync_gpio_num = config.pins.vsync,
+        .de_gpio_num = config.pins.de,
+        .pclk_gpio_num = config.pins.pclk,
+        .disp_gpio_num = -1,
+        .data_gpio_nums = {
+            config.pins.b0, config.pins.b1, config.pins.b2, config.pins.b3, config.pins.b4,
+            config.pins.g0, config.pins.g1, config.pins.g2, config.pins.g3, config.pins.g4, config.pins.g5,
+            config.pins.r0, config.pins.r1, config.pins.r2, config.pins.r3, config.pins.r4,
+        },
+        .flags = {
+            .disp_active_low = 0,
+            .refresh_on_demand = 0,
+            .fb_in_psram = 1,
+            .double_fb = 0,
+            .no_fb = 0,
+            .bb_invalidate_cache = 0,
+        },
+    };
+    
+    ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_conf, &lcd_panel));
 }
 
-void DisplayManager::init_mipi_parallel_display(const DisplayConfig& config) {
-    // Handle MIPI_PARALLEL interface (e.g., ST7701)
-    
-    // see: src/board/supported/viewe/BOARD_VIEWE_UEDX48480021_MD80ET.h
-    // see: https://github.com/Witaliy76/Yoradio_RGB_Panel/blob/996d063d1130aa3730d155a91bfb01332932d5c9/src/src/displays/displayUEDX48480021.cpp#L51
-    // 0. Initialize RST pin according to UEDX48480021 guide
+// ST7701 vendor-specific initialization commands
+// Based on UEDX48480021-MD80ET.h for round display
+static const esp_lcd_panel_vendor_init_cmd_t st7701_init_cmds[] = {
+    {0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x13}, 5, 0},
+    {0xEF, (uint8_t[]){0x08}, 1, 0},
+    {0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x10}, 5, 0},
+    {0xC0, (uint8_t[]){0x3B, 0x00}, 2, 0},
+    {0xC1, (uint8_t[]){0x0B, 0x02}, 2, 0},
+    {0xC2, (uint8_t[]){0x07, 0x02}, 2, 0},
+    {0xC7, (uint8_t[]){0x00}, 1, 0},
+    {0xCC, (uint8_t[]){0x10}, 1, 0},
+    {0xCD, (uint8_t[]){0x08}, 1, 0},
+    {0xB0, (uint8_t[]){0x00, 0x11, 0x16, 0x0E, 0x11, 0x06, 0x05, 0x09, 0x08, 0x21, 0x06, 0x13, 0x10, 0x29, 0x31, 0x18}, 16, 0},
+    {0xB1, (uint8_t[]){0x00, 0x11, 0x16, 0x0E, 0x11, 0x07, 0x05, 0x09, 0x09, 0x21, 0x05, 0x13, 0x11, 0x2A, 0x31, 0x18}, 16, 0},
+    {0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x11}, 5, 0},
+    {0xB0, (uint8_t[]){0x6D}, 1, 0},
+    {0xB1, (uint8_t[]){0x37}, 1, 0},
+    {0xB2, (uint8_t[]){0x8B}, 1, 0},
+    {0xB3, (uint8_t[]){0x80}, 1, 0},
+    {0xB5, (uint8_t[]){0x43}, 1, 0},
+    {0xB7, (uint8_t[]){0x85}, 1, 0},
+    {0xB8, (uint8_t[]){0x20}, 1, 0},
+    {0xC0, (uint8_t[]){0x09}, 1, 0},
+    {0xC1, (uint8_t[]){0x78}, 1, 0},
+    {0xC2, (uint8_t[]){0x78}, 1, 0},
+    {0xD0, (uint8_t[]){0x88}, 1, 0},
+    {0xE0, (uint8_t[]){0x00, 0x00, 0x02}, 3, 0},
+    {0xE1, (uint8_t[]){0x03, 0xA0, 0x00, 0x00, 0x04, 0xA0, 0x00, 0x00, 0x00, 0x20, 0x20}, 11, 0},
+    {0xE2, (uint8_t[]){0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 13, 0},
+    {0xE3, (uint8_t[]){0x00, 0x00, 0x11, 0x00}, 4, 0},
+    {0xE4, (uint8_t[]){0x22, 0x00}, 2, 0},
+    {0xE5, (uint8_t[]){0x05, 0xEC, 0xF6, 0xCA, 0x07, 0xEE, 0xF6, 0xCA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 16, 0},
+    {0xE6, (uint8_t[]){0x00, 0x00, 0x11, 0x00}, 4, 0},
+    {0xE7, (uint8_t[]){0x22, 0x00}, 2, 0},
+    {0xE8, (uint8_t[]){0x06, 0xED, 0xF6, 0xCA, 0x08, 0xEF, 0xF6, 0xCA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 16, 0},
+    {0xE9, (uint8_t[]){0x36, 0x00}, 2, 0},
+    {0xEB, (uint8_t[]){0x00, 0x00, 0x40, 0x40, 0x00, 0x00, 0x00}, 7, 0},
+    {0xED, (uint8_t[]){0xFF, 0xFF, 0xFF, 0xBA, 0x0A, 0xFF, 0x45, 0xFF, 0xFF, 0x54, 0xFF, 0xA0, 0xAB, 0xFF, 0xFF, 0xFF}, 16, 0},
+    {0xEF, (uint8_t[]){0x08, 0x08, 0x08, 0x45, 0x3F, 0x54}, 6, 0},
+    {0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x13}, 5, 0},
+    {0xE8, (uint8_t[]){0x00, 0x0E}, 2, 0},
+    {0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x00}, 5, 0},
+    {0x11, (uint8_t[]){0x00}, 0, 120},  // Sleep out + 120ms delay
+    {0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x13}, 5, 0},
+    {0xE8, (uint8_t[]){0x00, 0x0C}, 2, 0},
+    {0xE8, (uint8_t[]){0x00, 0x00}, 2, 0},
+    {0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x00}, 5, 0},
+    {0x36, (uint8_t[]){0x00}, 1, 0},  // Memory access control
+    {0x3A, (uint8_t[]){0x66}, 1, 0},  // Pixel format: 18-bit/pixel
+    {0x29, (uint8_t[]){0x00}, 0, 0},  // Display on
+};
+
+esp_err_t DisplayManager::init_st7701_commands(const DisplayConfig& config) {
+    // Reset LCD
     if (config.pins.rst >= 0) {
-        pinMode(config.pins.rst, OUTPUT);
-        digitalWrite(config.pins.rst, HIGH);  // RST HIGH (inactive)
-        delay(10);
-        digitalWrite(config.pins.rst, LOW);   // RST LOW (reset)
-        delay(10);
-        digitalWrite(config.pins.rst, HIGH);  // RST HIGH (active)
-        delay(50);  // Post-reset delay
+        gpio_set_direction((gpio_num_t)config.pins.rst, GPIO_MODE_OUTPUT);
+        gpio_set_level((gpio_num_t)config.pins.rst, 1);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level((gpio_num_t)config.pins.rst, 0);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level((gpio_num_t)config.pins.rst, 1);
+        vTaskDelay(pdMS_TO_TICKS(120));
     }
     
-    bus = new Arduino_SWSPI( //Arduino_ESP32SPI(
-        GFX_NOT_DEFINED, // dc
-        config.pins.cs, config.pins.sck, config.pins.sda, GFX_NOT_DEFINED
-    );
-
-    // Modern Arduino_GFX usage: create the panel, then the display
-    Arduino_ESP32RGBPanel* rgbpanel = new Arduino_ESP32RGBPanel(
-        config.pins.de, config.pins.vsync, config.pins.hsync, config.pins.pclk,
-        config.pins.r0, config.pins.r1, config.pins.r2, config.pins.r3, config.pins.r4,
-        config.pins.g0, config.pins.g1, config.pins.g2, config.pins.g3, config.pins.g4, config.pins.g5,
-        config.pins.b0, config.pins.b1, config.pins.b2, config.pins.b3, config.pins.b4,
-        // Horizontal/vertical timing parameters - CRITICAL for UEDX48480021
-        1 /* hsync_polarity */, 50 /* hsync_front_porch */, 8 /* hsync_pulse_width */, 10 /* hsync_back_porch */,
-        1 /* vsync_polarity */, 8 /* vsync_front_porch */, 2 /* vsync_pulse_width */, 18, /* vsync_back_porch */
-
-        0, // pclk_active_neg
-        16000000UL, // prefer_speed
-        // // To increase the upper limit of the PCLK, see: https://docs.espressif.com/projects/esp-faq/en/latest/software-framework/peripherals/lcd.html#how-can-i-increase-the-upper-limit-of-pclk-settings-on-esp32-s3-while-ensuring-normal-rgb-screen-display
-        false, // useBigEndian
-        0, // de_idle_high
-        0, // pclk_idle_high
-        0 //480*10  // bounce_buffer_size_px
-    );
-
-    // Determine init operations based on round vs rectangular
-    const uint8_t* init_ops;
-    size_t init_ops_len;
-    if (config.is_round) {
-        init_ops = st7701_type4_init_operations;
-        init_ops_len = sizeof(st7701_type4_init_operations);
-    } else {
-        init_ops = st7701_type1_init_operations;
-        init_ops_len = sizeof(st7701_type1_init_operations);
+    // Configure 3-wire SPI for sending commands
+    spi_bus_config_t buscfg = {
+        .mosi_io_num = config.pins.sda,
+        .miso_io_num = -1,
+        .sclk_io_num = config.pins.sck,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 128,
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    
+    esp_lcd_panel_io_handle_t io_handle = NULL;
+    esp_lcd_panel_io_spi_config_t io_config = {
+        .cs_gpio_num = config.pins.cs,
+        .dc_gpio_num = -1,  // 3-wire SPI (no DC pin)
+        .spi_mode = 0,
+        .pclk_hz = 1 * 1000 * 1000,  // 1 MHz for init commands
+        .trans_queue_depth = 10,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .flags = {
+            .dc_low_on_data = 0,
+            .octal_mode = 0,
+            .lsb_first = 0,
+        },
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &io_handle));
+    
+    // Send initialization commands
+    for (size_t i = 0; i < sizeof(st7701_init_cmds) / sizeof(st7701_init_cmds[0]); i++) {
+        esp_lcd_panel_io_tx_param(io_handle, st7701_init_cmds[i].cmd, 
+                                  st7701_init_cmds[i].data, st7701_init_cmds[i].data_bytes);
+        if (st7701_init_cmds[i].delay_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(st7701_init_cmds[i].delay_ms));
+        }
     }
-
-    gfx_device = new Arduino_RGB_Display(
-        config.width, config.height, rgbpanel, config.rotation, 
-        true, // auto_flush
-        bus,
-        config.pins.rst >= 0 ? config.pins.rst : GFX_NOT_DEFINED,
-        init_ops, init_ops_len
-    );
+    
+    // Clean up panel IO (we only need it for initialization)
+    esp_lcd_panel_io_del(io_handle);
+    spi_bus_free(SPI2_HOST);
+    
+    return ESP_OK;
 }
 
 void DisplayManager::update() {
@@ -188,57 +295,6 @@ void DisplayManager::update() {
     
     touch_driver.update();
     lv_timer_handler();
-}
-
-// Update the refresh area to be full width
-// This avoids weird artifacts when partial row updates are used
-void DisplayManager::display_rounder_cb(lv_event_t* e) {
-    lv_area_t* area = (lv_area_t*)lv_event_get_param(e);
-    
-    area->x1 = 0;
-    area->x2 = g_display_manager->screen_width - 1;
-}
-
-void DisplayManager::display_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
-    if (!g_display_manager || !g_display_manager->gfx_device) return;
-    
-    uint32_t w = lv_area_get_width(area);
-    uint32_t h = lv_area_get_height(area);
-
-    uint32_t remaining_rows = h;
-    uint32_t current_y = area->y1;
-    uint32_t src_row_offset = 0;
-    uint16_t* staging = g_display_manager->dma_staging_buffer;
-    uint32_t staging_rows = g_display_manager->dma_staging_rows ? g_display_manager->dma_staging_rows : h;
-    const uint16_t* src_pixels = reinterpret_cast<const uint16_t*>(px_map);
-
-    while (remaining_rows > 0) {
-        uint32_t rows = std::min<uint32_t>(remaining_rows, staging_rows);
-        size_t copy_pixels = static_cast<size_t>(w) * rows;
-        const uint16_t* chunk_src = src_pixels + (static_cast<size_t>(src_row_offset) * w);
-
-        if (staging) {
-            memcpy(staging, chunk_src, copy_pixels * sizeof(uint16_t));
-
-            if (LV_COLOR_16_SWAP) {
-                g_display_manager->gfx_device->draw16bitBeRGBBitmap(area->x1, current_y, staging, w, rows);
-            } else {
-                g_display_manager->gfx_device->draw16bitRGBBitmap(area->x1, current_y, staging, w, rows);
-            }
-        } else {
-            if (LV_COLOR_16_SWAP) {
-                g_display_manager->gfx_device->draw16bitBeRGBBitmap(area->x1, current_y, const_cast<uint16_t*>(chunk_src), w, rows);
-            } else {
-                g_display_manager->gfx_device->draw16bitRGBBitmap(area->x1, current_y, const_cast<uint16_t*>(chunk_src), w, rows);
-            }
-        }
-
-        remaining_rows -= rows;
-        src_row_offset += rows;
-        current_y += rows;
-    }
-    
-    lv_display_flush_ready(disp);
 }
 
 void DisplayManager::touchpad_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
@@ -255,12 +311,8 @@ void DisplayManager::touchpad_read_cb(lv_indev_t* indev, lv_indev_data_t* data) 
     }
 }
 
-uint32_t DisplayManager::millis_cb() {
-    return millis();
-}
-
 void DisplayManager::set_brightness(float brightness) {
-    if (!initialized || !gfx_device) return;
+    if (!initialized) return;
     
     const DisplayConfig& config = ACTIVE_DISPLAY;
     
@@ -273,24 +325,40 @@ void DisplayManager::set_brightness(float brightness) {
     if (brightness < min_brightness) brightness = min_brightness;
     
     // Set brightness based on driver type
-    if (strcmp(config.driver_name, "CO5300") == 0) {
-        // CO5300: Use driver's built-in brightness control
-        Arduino_CO5300* display = static_cast<Arduino_CO5300*>(gfx_device);
-        uint8_t brightness_value = (uint8_t)(brightness * 255.0f);
-        display->setBrightness(brightness_value);
-    }
-    else if (strcmp(config.driver_name, "ST7701") == 0) {
+    if (strcmp(config.driver_name, "ST7701") == 0) {
         // ST7701: Use PWM-based backlight control
         if (config.pins.bl >= 0) {
             uint8_t brightness_value = (uint8_t)(brightness * 255.0f);
             // Configure PWM for backlight pin if not already configured
             static bool bl_pwm_configured = false;
             if (!bl_pwm_configured) {
-                ledcAttach(config.pins.bl, 5000, 8); // pin, 5kHz, 8-bit
+                ledc_timer_config_t ledc_timer = {
+                    .speed_mode = LEDC_LOW_SPEED_MODE,
+                    .duty_resolution = LEDC_TIMER_8_BIT,
+                    .timer_num = LEDC_TIMER_0,
+                    .freq_hz = 5000,
+                    .clk_cfg = LEDC_AUTO_CLK
+                };
+                ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+                ledc_channel_config_t ledc_channel = {
+                    .gpio_num = config.pins.bl,
+                    .speed_mode = LEDC_LOW_SPEED_MODE,
+                    .channel = LEDC_CHANNEL_0,
+                    .intr_type = LEDC_INTR_DISABLE,
+                    .timer_sel = LEDC_TIMER_0,
+                    .duty = 0,
+                    .hpoint = 0
+                };
+                ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
                 bl_pwm_configured = true;
             }
-            ledcWrite(0, brightness_value);
+            ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, brightness_value));
+            ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
         }
     }
-    // Add other driver types here as needed
+    else if (strcmp(config.driver_name, "CO5300") == 0) {
+        // CO5300: Not implemented with esp_lvgl_port
+        LOG_BLE("[DISPLAY] WARNING: CO5300 brightness control not implemented\n");
+    }
 }

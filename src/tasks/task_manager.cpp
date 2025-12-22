@@ -13,7 +13,8 @@
 #include "../logging/grind_logging.h"
 #include "../config/constants.h"
 #include <esp_task_wdt.h>
-#include <Arduino.h>
+#include <esp_heap_caps.h>
+#include <esp_psram.h>
 
 // Global instance
 TaskManager task_manager;
@@ -120,19 +121,25 @@ bool TaskManager::create_all_tasks() {
     // Create tasks in order of priority (highest to lowest)
 
     // Check PSRAM
-    if (psramFound()) {
-        LOG_BLE("PSRAM found: %u bytes free\n", ESP.getFreePsram());
+    size_t psram_size = esp_psram_get_size();
+    if (psram_size > 0) {
+        size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        LOG_BLE("PSRAM found (%u bytes total): %u bytes free\n", (unsigned)psram_size, (unsigned)psram_free);
     } else {
         LOG_BLE("WARNING: PSRAM not found!\n");
     }
-    LOG_BLE("Internal RAM: %u bytes free\n", ESP.getFreeHeap());
+    LOG_BLE("Internal RAM: %u bytes free\n", (unsigned)esp_get_free_heap_size());
     
 
     
+    #if HX711_HAS_SCK_PIN && HX711_HAS_DOUT_PIN
     if (!create_weight_sampling_task()) {
         LOG_BLE("ERROR: Failed to create weight sampling task\n");
         return false;
     }
+    #else
+    LOG_BLE("TaskManager: Skipping weight sampling task (load cell disabled)\n");
+    #endif
     
     if (!create_grind_control_task()) {
         LOG_BLE("ERROR: Failed to create grind control task\n");
@@ -230,7 +237,7 @@ bool TaskManager::create_bluetooth_task() {
         nullptr,
         SYS_TASK_PRIORITY_BLUETOOTH,
         &task_handles.bluetooth_task,
-        1  // Pin to Core 1
+        0  // Pin to Core 1
     );
     
     if (result != pdPASS) {
@@ -251,7 +258,7 @@ bool TaskManager::create_file_io_task() {
         nullptr,
         SYS_TASK_PRIORITY_FILE_IO,
         &task_handles.file_io_task,
-        1  // Pin to Core 1
+        0  // Pin to Core 1
     );
     
     if (result != pdPASS) {

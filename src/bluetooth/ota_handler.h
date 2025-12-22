@@ -1,7 +1,7 @@
 #pragma once
 
-#include <Arduino.h>
-#include <Preferences.h>
+#include "../system/Preferences.h"
+#include <string>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
@@ -53,7 +53,7 @@ private:
     uint32_t patch_size;
     uint32_t received_size;
     BLEOTAStatus current_status;
-    String current_firmware_build_number;
+    std::string current_firmware_build_number;
     bool is_full_update;
     
     // OTA tracking
@@ -143,5 +143,5 @@ public:
      * Check if OTA failed after reboot and return expected build number if so
      * @return Expected build number if OTA failed, empty string if no failure or no expectation
      */
-    String check_ota_failure_after_boot();
+    std::string check_ota_failure_after_boot();
 };

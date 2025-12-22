@@ -4,10 +4,11 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include "String.h"
 #include <functional>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
-#include <Preferences.h>
+#include "../system/Preferences.h"
 
 #include "../config/constants.h"
 #include "ota_handler.h"

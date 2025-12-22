@@ -4,7 +4,9 @@
 #include <cstdint>
 #ifdef ESP_PLATFORM
 #include <esp_system.h>
+#include <esp_random.h>
 #endif
+#include "esp_timer.h"
 
 MockHX711Driver* MockHX711Driver::instance = nullptr;
 

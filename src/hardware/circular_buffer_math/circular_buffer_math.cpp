@@ -2,6 +2,8 @@
 #include "../../config/constants.h"
 #include <math.h>
 #include <algorithm>
+#include <cstring>
+#include "esp_timer.h"
 
 CircularBufferMath::CircularBufferMath() {
     write_index = 0;
@@ -74,7 +76,7 @@ int32_t CircularBufferMath::get_smoothed_raw(uint32_t window_ms) const {
 int CircularBufferMath::get_samples_in_window(uint32_t window_ms, int32_t* samples_out) const {
     if (samples_count == 0) return 0;
     
-    uint32_t current_time = millis();
+    uint32_t current_time = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     uint32_t window_start = current_time - window_ms;
     int collected_samples = 0;
     
@@ -203,7 +205,7 @@ bool CircularBufferMath::get_window_delta(uint32_t window_ms, int32_t* delta_out
         return false;
     }
 
-    uint32_t current_time = millis();
+    uint32_t current_time = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     uint32_t window_start = current_time - window_ms;
 
     int collected = 0;
@@ -261,7 +263,8 @@ bool CircularBufferMath::is_settled(uint32_t window_ms, int32_t threshold_raw_un
     
     // Debug output every 1s during settling checks
     static uint32_t last_debug_time = 0;
-    if (millis() - last_debug_time > 1000) {
+    uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    if (now_ms - last_debug_time > 1000) {
         // Get raw samples for display
         int max_samples = calculate_max_samples_for_window(window_ms);
         if (max_samples > 0) {
@@ -284,7 +287,7 @@ bool CircularBufferMath::is_settled(uint32_t window_ms, int32_t threshold_raw_un
                              window_ms, actual_samples, sample_str, std_dev, (long)threshold_raw_units, 
                              settled ? "YES" : "NO");
         }
-        last_debug_time = millis();
+            last_debug_time = now_ms;
     }
     
     return settled;
@@ -348,7 +351,7 @@ float CircularBufferMath::get_raw_flow_rate(uint32_t window_ms) const {
     
     // Get samples and timestamps within window
     int collected = 0;
-    uint32_t current_time = millis();
+    uint32_t current_time = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     uint32_t window_start = current_time - window_ms;
     
     for (int i = 0; i < (int)samples_count && collected < max_samples; i++) {
@@ -401,7 +404,7 @@ float CircularBufferMath::get_raw_flow_rate_95th_percentile(uint32_t window_ms) 
     int32_t* sample_values = (int32_t*)alloca(max_samples * sizeof(int32_t));
     uint32_t* sample_times = (uint32_t*)alloca(max_samples * sizeof(uint32_t));
     int collected_samples = 0;
-    uint32_t current_time = millis();
+    uint32_t current_time = static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     uint32_t window_start_time = current_time - effective_window_ms;
 
     for (int i = 0; i < (int)samples_count && collected_samples < max_samples; ++i) {

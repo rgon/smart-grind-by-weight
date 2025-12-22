@@ -6,6 +6,7 @@
 
 // Application includes
 #include "config/logging.h"
+#include "utils/littlefs_init.h"
 #include "hardware/hardware_manager.h"
 #include "system/state_machine.h"
 #include "system/statistics_manager.h"
@@ -36,9 +37,14 @@ static uint32_t core1_cycle_time_max_ms = 0;
 static uint32_t core1_last_heartbeat_time = 0;
 #endif
 
-void app_main(void) {
+extern "C" void app_main(void) {
     // Initialize logging system
     logging_init();
+    
+    // Initialize LittleFS filesystem (must be before any file I/O)
+    if (!littlefs_init()) {
+        LOG_BLE("[STARTUP] WARNING: LittleFS initialization failed\n");
+    }
     
     LOG_BLE("[STARTUP] Initializing ESP32-S3 Coffee Scale - Build %d\n", BUILD_NUMBER);
     
@@ -53,8 +59,8 @@ void app_main(void) {
     bluetooth_manager.init(hardware_manager.get_preferences());
     
     // Check for OTA failure to determine initial state
-    String failed_ota_build = bluetooth_manager.check_ota_failure_after_boot();
-    bool ota_failed = !failed_ota_build.isEmpty();
+    std::string failed_ota_build = bluetooth_manager.check_ota_failure_after_boot();
+    bool ota_failed = !failed_ota_build.empty();
 
     // Check calibration status to determine initial screen
     bool is_calibrated = hardware_manager.get_weight_sensor()->is_calibrated();

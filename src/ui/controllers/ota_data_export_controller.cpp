@@ -1,7 +1,8 @@
 #include "ota_data_export_controller.h"
 
-#include <Arduino.h>
 #include <cstring>
+
+#include "Serial.h"
 
 #include "../ui_manager.h"
 
