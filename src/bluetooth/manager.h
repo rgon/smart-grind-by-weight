@@ -1,10 +1,7 @@
 #pragma once
 
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
-#include "String.h"
+#include "../ble/bluedroid_server.h"
+#include <string>
 #include <functional>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>

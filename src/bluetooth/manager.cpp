@@ -4,10 +4,10 @@
 #include <esp_system.h>
 #include <nvs_flash.h>
 #include <nvs.h>
-#include "ESP.h"
-#include "Serial.h"
-#include "File.h"
-#include "LittleFS.h"
+#include <esp_heap_caps.h>
+#include <soc/rtc.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include "../system/performance_monitor.h"
 #include "../system/statistics_manager.h"
 #include "../system/diagnostics_controller.h"
@@ -645,10 +645,8 @@ void BluetoothManager::log(const char* format, ...) {
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
 
-    // Note: This is the log method itself, so we print to Serial directly
-    Serial.print(buffer);
-
-    // is_debug_stream_active() is the same as debug_stream_active
+    // Note: Logging to BLE debug stream only when active
+    // Main logging uses esp_log.h (LOG_BLE macro)
     if (debug_stream_active) {
         send_log_message(buffer);
     }
@@ -689,8 +687,8 @@ void BluetoothManager::handle_ota_control_command(BLECharacteristic* characteris
                 update_ui_status("Receiving update...");
                 
                 // Parse build number if present
-                String expected_build = "";
-                String expected_firmware_version = "";
+                std::string expected_build = "";
+                std::string expected_firmware_version = "";
                 size_t offset = 7;
                 
                 if (data.length() > 6) {
@@ -892,7 +890,7 @@ void BluetoothManager::onRead(BLECharacteristic* characteristic) {
     // Reserved for future use
 }
 
-String BluetoothManager::check_ota_failure_after_boot() {
+std::string BluetoothManager::check_ota_failure_after_boot() {
     return ota_handler.check_ota_failure_after_boot();
 }
 
@@ -915,10 +913,16 @@ void BluetoothManager::update_system_info() {
     unsigned long uptime_hours = uptime_minutes / 60;
     
     // Get ESP32 system information
-    size_t heap_free = ESP.getFreeHeap();
-    size_t heap_total = ESP.getHeapSize();
+    size_t heap_free = esp_get_free_heap_size();
+    size_t heap_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
     size_t heap_used = heap_total - heap_free;
-    uint32_t flash_size = ESP.getFlashChipSize();
+    uint32_t flash_size = 16 * 1024 * 1024;  // 16MB default for ESP32-S3
+    
+    // Get CPU frequency
+    rtc_cpu_freq_config_t cpu_config;
+    rtc_clk_cpu_freq_get_config(&cpu_config);
+    uint32_t cpu_freq = cpu_config.freq_mhz;
+    
     float heap_usage_percent = (float(heap_used) / float(heap_total)) * 100.0f;
     
     snprintf(buffer, sizeof(buffer),
@@ -943,7 +947,7 @@ void BluetoothManager::update_system_info() {
         (unsigned int)heap_total,
         heap_usage_percent,
         (unsigned int)flash_size,
-        (unsigned int)ESP.getCpuFreqMHz()
+        (unsigned int)cpu_freq
     );
     
     sysinfo_system_characteristic->setValue(buffer);
@@ -1116,10 +1120,15 @@ void BluetoothManager::generate_diagnostic_report() {
     send_chunk(buf);
 
     // Section 2: System Runtime
-    size_t heap_free = ESP.getFreeHeap();
-    size_t heap_total = ESP.getHeapSize();
+    size_t heap_free = esp_get_free_heap_size();
+    size_t heap_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
     float heap_used_pct = (float(heap_total - heap_free) / float(heap_total)) * 100.0f;
-    uint32_t flash_size = ESP.getFlashChipSize();
+    uint32_t flash_size = 16 * 1024 * 1024;  // 16MB default for ESP32-S3
+
+    // Get CPU frequency
+    rtc_cpu_freq_config_t cpu_config;
+    rtc_clk_cpu_freq_get_config(&cpu_config);
+    uint32_t cpu_freq = cpu_config.freq_mhz;
 
     const char* driver_type =
 #ifdef MOCK_BUILD
@@ -1137,7 +1146,7 @@ void BluetoothManager::generate_diagnostic_report() {
         "  Driver: %s\n"
         "\n",
         uptime_h, uptime_m, uptime_sec,
-        (unsigned long)ESP.getCpuFreqMHz(),
+        (unsigned long)cpu_freq,
         (unsigned int)(heap_free / 1024),
         (unsigned int)(heap_total / 1024),
         heap_used_pct,
@@ -1476,7 +1485,7 @@ void BluetoothManager::generate_diagnostic_report() {
                         break;
                     }
                     case NVS_TYPE_STR: {
-                        String val = pref.getString(info.key, "");
+                        std::string val = pref.getString(info.key, "");
                         snprintf(buf, sizeof(buf), "    %s: \"%s\" (string)\n", info.key, val.c_str());
                         break;
                     }
@@ -1537,197 +1546,191 @@ void BluetoothManager::generate_diagnostic_report() {
     snprintf(buf, sizeof(buf), "[LAST 5 GRIND SESSIONS]\n");
     send_chunk(buf);
 
-    if (LittleFS.exists(GRIND_SESSIONS_DIR)) {
-        File dir = LittleFS.open(GRIND_SESSIONS_DIR);
-        if (dir && dir.isDirectory()) {
-            // Collect all session IDs
-            const int MAX_SESSIONS = 100;
-            const size_t session_buf_bytes = MAX_SESSIONS * sizeof(uint32_t);
-            uint32_t* session_ids = static_cast<uint32_t*>(malloc(session_buf_bytes));
-            int count = 0;
+    // Use POSIX APIs to access LittleFS via ESP-IDF VFS
+    DIR* dir = opendir(GRIND_SESSIONS_DIR);
+    if (dir) {
+        // Collect all session IDs
+        const int MAX_SESSIONS = 100;
+        const size_t session_buf_bytes = MAX_SESSIONS * sizeof(uint32_t);
+        uint32_t* session_ids = static_cast<uint32_t*>(malloc(session_buf_bytes));
+        int count = 0;
 
-            if (session_ids) {
-                File file = dir.openNextFile();
-                while (file && count < MAX_SESSIONS) {
-                    String filename = file.name();
-                    if ((filename.startsWith("session_") || filename.indexOf("/session_") != -1) && filename.endsWith(".bin")) {
-                        int start_pos = filename.indexOf('_') + 1;
-                        int end_pos = filename.lastIndexOf('.');
-                        if (start_pos > 0 && end_pos > start_pos) {
-                            session_ids[count++] = filename.substring(start_pos, end_pos).toInt();
-                        }
-                    }
-                    file = dir.openNextFile();
-                }
-                file.close();
-                dir.close();
-
-                // Sort session IDs descending (highest/newest first)
-                for (int i = 0; i < count - 1; i++) {
-                    for (int j = i + 1; j < count; j++) {
-                        if (session_ids[i] < session_ids[j]) {
-                            uint32_t temp = session_ids[i];
-                            session_ids[i] = session_ids[j];
-                            session_ids[j] = temp;
-                        }
+        if (session_ids) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != nullptr && count < MAX_SESSIONS) {
+                const char* filename = entry->d_name;
+                // Check if filename matches pattern: session_NNNNNN.bin
+                if (strncmp(filename, "session_", 8) == 0 && strstr(filename, ".bin")) {
+                    // Extract session ID from filename
+                    uint32_t session_id = 0;
+                    if (sscanf(filename + 8, "%lu", &session_id) == 1) {
+                        session_ids[count++] = session_id;
                     }
                 }
+            }
+            closedir(dir);
 
-                // Read and output last 5 sessions
-                int sessions_to_show = (count < 5) ? count : 5;
-                for (int i = 0; i < sessions_to_show; i++) {
-                    char filename[64];
-                    snprintf(filename, sizeof(filename), SESSION_FILE_FORMAT, session_ids[i]);
+            // Sort session IDs descending (highest/newest first)
+            for (int i = 0; i < count - 1; i++) {
+                for (int j = i + 1; j < count; j++) {
+                    if (session_ids[i] < session_ids[j]) {
+                        uint32_t temp = session_ids[i];
+                        session_ids[i] = session_ids[j];
+                        session_ids[j] = temp;
+                    }
+                }
+            }
 
-                    File sessionFile = LittleFS.open(filename, "r");
-                    if (sessionFile) {
-                        TimeSeriesSessionHeader header;
-                        GrindSession session;
+            // Read and output last 5 sessions
+            int sessions_to_show = (count < 5) ? count : 5;
+            for (int i = 0; i < sessions_to_show; i++) {
+                char filename[128];
+                snprintf(filename, sizeof(filename), SESSION_FILE_FORMAT, session_ids[i]);
 
-                        if (sessionFile.read((uint8_t*)&header, sizeof(header)) == sizeof(header) &&
-                            sessionFile.read((uint8_t*)&session, sizeof(session)) == sizeof(session)) {
+                FILE* sessionFile = fopen(filename, "rb");
+                if (sessionFile) {
+                    TimeSeriesSessionHeader header;
+                    GrindSession session;
 
-                            const char* mode_name = (session.grind_mode == 0) ? "WEIGHT" : "TIME";
-                            const char* term_names[] = {"COMPLETED", "TIMEOUT", "OVERSHOOT", "MAX_PULSES", "UNKNOWN"};
-                            const char* term_name = (session.termination_reason < 4) ? term_names[session.termination_reason] : term_names[4];
+                    if (fread(&header, sizeof(header), 1, sessionFile) == 1 &&
+                        fread(&session, sizeof(session), 1, sessionFile) == 1) {
 
-                            snprintf(buf, sizeof(buf),
-                                "\n--- Session #%lu ---\n"
-                                "  Mode: %s | Profile: %u | Status: %.16s\n"
-                                "  Target: %.1fg | Final: %.1fg | Error: %+.2fg\n"
-                                "  Total Time: %.1fs | Motor Time: %.1fs | Pulses: %u\n"
-                                "  Termination: %s\n",
-                                session.session_id,
-                                mode_name, session.profile_id, session.result_status,
-                                session.target_weight, session.final_weight, session.error_grams,
-                                session.total_time_ms / 1000.0f, session.total_motor_on_time_ms / 1000.0f, session.pulse_count,
-                                term_name
-                            );
+                        const char* mode_name = (session.grind_mode == 0) ? "WEIGHT" : "TIME";
+                        const char* term_names[] = {"COMPLETED", "TIMEOUT", "OVERSHOOT", "MAX_PULSES", "UNKNOWN"};
+                        const char* term_name = (session.termination_reason < 4) ? term_names[session.termination_reason] : term_names[4];
+
+                        snprintf(buf, sizeof(buf),
+                            "\n--- Session #%lu ---\n"
+                            "  Mode: %s | Profile: %u | Status: %.16s\n"
+                            "  Target: %.1fg | Final: %.1fg | Error: %+.2fg\n"
+                            "  Total Time: %.1fs | Motor Time: %.1fs | Pulses: %u\n"
+                            "  Termination: %s\n",
+                            session.session_id,
+                            mode_name, session.profile_id, session.result_status,
+                            session.target_weight, session.final_weight, session.error_grams,
+                            session.total_time_ms / 1000.0f, session.total_motor_on_time_ms / 1000.0f, session.pulse_count,
+                            term_name
+                        );
+                        send_chunk(buf);
+
+                        // Read and output events
+                        if (header.event_count > 0) {
+                            snprintf(buf, sizeof(buf), "  Events (%u):\n", header.event_count);
                             send_chunk(buf);
 
-                            // Read and output events
-                            if (header.event_count > 0) {
-                                snprintf(buf, sizeof(buf), "  Events (%u):\n", header.event_count);
-                                send_chunk(buf);
+                            static const char* const phase_names[] = {
+                                "IDLE", "INITIALIZING", "SETUP", "TARING", "TARE_CONFIRM",
+                                "PREDICTIVE", "PULSE_DECISION", "PULSE_EXECUTE", "PULSE_SETTLING",
+                                "FINAL_SETTLING", "TIME_GRINDING", "TIME_ADDITIONAL_PULSE", "COMPLETED", "TIMEOUT",
+                                "PRIME", "PRIME_SETTLING", "PURGE_CONFIRM"
+                            };
+                            const size_t phase_name_count = sizeof(phase_names) / sizeof(phase_names[0]);
 
-                                static const char* const phase_names[] = {
-                                    "IDLE", "INITIALIZING", "SETUP", "TARING", "TARE_CONFIRM",
-                                    "PREDICTIVE", "PULSE_DECISION", "PULSE_EXECUTE", "PULSE_SETTLING",
-                                    "FINAL_SETTLING", "TIME_GRINDING", "TIME_ADDITIONAL_PULSE", "COMPLETED", "TIMEOUT",
-                                    "PRIME", "PRIME_SETTLING", "PURGE_CONFIRM"
-                                };
-                                const size_t phase_name_count = sizeof(phase_names) / sizeof(phase_names[0]);
+                            for (uint16_t e = 0; e < header.event_count; e++) {
+                                GrindEvent event;
+                                if (fread(&event, sizeof(event), 1, sessionFile) == 1) {
+                                    const char* phase_name = (event.phase_id < phase_name_count) ? phase_names[event.phase_id] : "UNKNOWN";
 
-                                for (uint16_t e = 0; e < header.event_count; e++) {
-                                    GrindEvent event;
-                                    if (sessionFile.read((uint8_t*)&event, sizeof(event)) == sizeof(event)) {
-                                        const char* phase_name = (event.phase_id < phase_name_count) ? phase_names[event.phase_id] : "UNKNOWN";
+                                    // Calculate event yield (delta)
+                                    float event_yield = event.end_weight - event.start_weight;
 
-                                        // Calculate event yield (delta)
-                                        float event_yield = event.end_weight - event.start_weight;
-
-                                        // Build base event string
-                                        char base_str[256];
-                                        if (event.pulse_attempt_number > 0) {
-                                            snprintf(base_str, sizeof(base_str),
-                                                "    [%lums] %s (pulse #%u): %.2fg -> %.2fg (%+.2fg) (%.1fms pulse)",
-                                                event.timestamp_ms,
-                                                phase_name,
-                                                event.pulse_attempt_number,
-                                                event.start_weight,
-                                                event.end_weight,
-                                                event_yield,
-                                                event.pulse_duration_ms
-                                            );
-                                        } else {
-                                            snprintf(base_str, sizeof(base_str),
-                                                "    [%lums] %s: %.2fg -> %.2fg (%+.2fg) (%lums)",
-                                                event.timestamp_ms,
-                                                phase_name,
-                                                event.start_weight,
-                                                event.end_weight,
-                                                event_yield,
-                                                event.duration_ms
-                                            );
-                                        }
-
-                                        // Build phase-specific metrics suffix
-                                        char metrics_str[256] = "";
-
-                                        switch (event.phase_id) {
-                                            case 5: // PREDICTIVE
-                                                if (event.grind_latency_ms > 0 || event.pulse_flow_rate > 0 || event.motor_stop_target_weight > 0) {
-                                                    snprintf(metrics_str, sizeof(metrics_str), " | Latency: %lums, Flow: %.1fg/s, Target: %.1fg",
-                                                        event.grind_latency_ms,
-                                                        event.pulse_flow_rate,
-                                                        event.motor_stop_target_weight
-                                                    );
-                                                }
-                                                break;
-
-                                            case 7: // PULSE_EXECUTE
-                                                if (event.pulse_flow_rate > 0 || event.motor_stop_target_weight > 0) {
-                                                    snprintf(metrics_str, sizeof(metrics_str), " | Flow: %.1fg/s, Target: %.1fg",
-                                                        event.pulse_flow_rate,
-                                                        event.motor_stop_target_weight
-                                                    );
-                                                }
-                                                break;
-
-                                            case 8: // PULSE_SETTLING
-                                                if (event.settling_duration_ms > 0 || event.motor_stop_target_weight > 0) {
-                                                    snprintf(metrics_str, sizeof(metrics_str), " | Settled: %lums, Target: %.1fg",
-                                                        event.settling_duration_ms,
-                                                        event.motor_stop_target_weight
-                                                    );
-                                                }
-                                                break;
-
-                                            case 9: // FINAL_SETTLING
-                                                if (event.settling_duration_ms > 0) {
-                                                    snprintf(metrics_str, sizeof(metrics_str), " | Settled: %lums",
-                                                        event.settling_duration_ms
-                                                    );
-                                                }
-                                                break;
-
-                                            case 10: // TIME_GRINDING
-                                                if (event.pulse_flow_rate > 0) {
-                                                    snprintf(metrics_str, sizeof(metrics_str), " | Flow: %.1fg/s",
-                                                        event.pulse_flow_rate
-                                                    );
-                                                }
-                                                break;
-
-                                            case 11: // TIME_ADDITIONAL_PULSE
-                                                if (event.pulse_flow_rate > 0) {
-                                                    snprintf(metrics_str, sizeof(metrics_str), " | Flow: %.1fg/s",
-                                                        event.pulse_flow_rate
-                                                    );
-                                                }
-                                                break;
-                                        }
-
-                                        // Combine base and metrics, add newline
-                                        snprintf(buf, sizeof(buf), "%s%s\n", base_str, metrics_str);
-                                        send_chunk(buf);
+                                    // Build base event string
+                                    char base_str[256];
+                                    if (event.pulse_attempt_number > 0) {
+                                        snprintf(base_str, sizeof(base_str),
+                                            "    [%lums] %s (pulse #%u): %.2fg -> %.2fg (%+.2fg) (%.1fms pulse)",
+                                            event.timestamp_ms,
+                                            phase_name,
+                                            event.pulse_attempt_number,
+                                            event.start_weight,
+                                            event.end_weight,
+                                            event_yield,
+                                            event.pulse_duration_ms
+                                        );
+                                    } else {
+                                        snprintf(base_str, sizeof(base_str),
+                                            "    [%lums] %s: %.2fg -> %.2fg (%+.2fg) (%lums)",
+                                            event.timestamp_ms,
+                                            phase_name,
+                                            event.start_weight,
+                                            event.end_weight,
+                                            event_yield,
+                                            event.duration_ms
+                                        );
                                     }
+
+                                    // Build phase-specific metrics suffix
+                                    char metrics_str[256] = "";
+
+                                    switch (event.phase_id) {
+                                        case 5: // PREDICTIVE
+                                            if (event.grind_latency_ms > 0 || event.pulse_flow_rate > 0 || event.motor_stop_target_weight > 0) {
+                                                snprintf(metrics_str, sizeof(metrics_str), " | Latency: %lums, Flow: %.1fg/s, Target: %.1fg",
+                                                    event.grind_latency_ms,
+                                                    event.pulse_flow_rate,
+                                                    event.motor_stop_target_weight
+                                                );
+                                            }
+                                            break;
+
+                                        case 7: // PULSE_EXECUTE
+                                            if (event.pulse_flow_rate > 0 || event.motor_stop_target_weight > 0) {
+                                                snprintf(metrics_str, sizeof(metrics_str), " | Flow: %.1fg/s, Target: %.1fg",
+                                                    event.pulse_flow_rate,
+                                                    event.motor_stop_target_weight
+                                                );
+                                            }
+                                            break;
+
+                                        case 8: // PULSE_SETTLING
+                                            if (event.settling_duration_ms > 0 || event.motor_stop_target_weight > 0) {
+                                                snprintf(metrics_str, sizeof(metrics_str), " | Settled: %lums, Target: %.1fg",
+                                                    event.settling_duration_ms,
+                                                    event.motor_stop_target_weight
+                                                );
+                                            }
+                                            break;
+
+                                        case 9: // FINAL_SETTLING
+                                            if (event.settling_duration_ms > 0) {
+                                                snprintf(metrics_str, sizeof(metrics_str), " | Settled: %lums",
+                                                    event.settling_duration_ms
+                                                );
+                                            }
+                                            break;
+
+                                        case 10: // TIME_GRINDING
+                                            if (event.pulse_flow_rate > 0) {
+                                                snprintf(metrics_str, sizeof(metrics_str), " | Flow: %.1fg/s",
+                                                    event.pulse_flow_rate
+                                                );
+                                            }
+                                            break;
+
+                                        case 11: // TIME_ADDITIONAL_PULSE
+                                            if (event.pulse_flow_rate > 0) {
+                                                snprintf(metrics_str, sizeof(metrics_str), " | Flow: %.1fg/s",
+                                                    event.pulse_flow_rate
+                                                );
+                                            }
+                                            break;
+                                    }
+
+                                    // Combine base and metrics, add newline
+                                    snprintf(buf, sizeof(buf), "%s%s\n", base_str, metrics_str);
+                                    send_chunk(buf);
                                 }
                             }
                         }
-                        sessionFile.close();
                     }
+                    fclose(sessionFile);
                 }
-
-                free(session_ids);
-            } else {
-                dir.close();
-                snprintf(buf, sizeof(buf), "  [ERROR] Unable to allocate session buffer (%u bytes)\n",
-                    (unsigned int)session_buf_bytes);
-                send_chunk(buf);
             }
+
+            free(session_ids);
         } else {
-            snprintf(buf, sizeof(buf), "  [NONE] No session files found\n");
+            snprintf(buf, sizeof(buf), "  [ERROR] Unable to allocate session buffer (%u bytes)\n",
+                (unsigned int)session_buf_bytes);
             send_chunk(buf);
         }
     } else {
@@ -1742,28 +1745,19 @@ void BluetoothManager::generate_diagnostic_report() {
     snprintf(buf, sizeof(buf), "[AUTOTUNE RESULTS]\n");
     send_chunk(buf);
 
-    if (LittleFS.exists("/autotune.log")) {
-        File autotuneFile = LittleFS.open("/autotune.log", "r");
-        if (autotuneFile) {
-            // Stream file contents in chunks
-            while (autotuneFile.available()) {
-                size_t bytesToRead = autotuneFile.available();
-                if (bytesToRead > sizeof(buf) - 1) {
-                    bytesToRead = sizeof(buf) - 1;
-                }
-                size_t bytesRead = autotuneFile.readBytes(buf, bytesToRead);
-                buf[bytesRead] = '\0';
-                send_chunk(buf);
-            }
-            autotuneFile.close();
-
-            // Add newline after file contents
-            snprintf(buf, sizeof(buf), "\n");
-            send_chunk(buf);
-        } else {
-            snprintf(buf, sizeof(buf), "  [ERROR] Failed to open autotune.log\n\n");
+    FILE* autotuneFile = fopen("/littlefs/autotune.log", "r");
+    if (autotuneFile) {
+        // Stream file contents in chunks
+        size_t bytes_read;
+        while ((bytes_read = fread(buf, 1, sizeof(buf) - 1, autotuneFile)) > 0) {
+            buf[bytes_read] = '\0';
             send_chunk(buf);
         }
+        fclose(autotuneFile);
+
+        // Add newline after file contents
+        snprintf(buf, sizeof(buf), "\n");
+        send_chunk(buf);
     } else {
         snprintf(buf, sizeof(buf), "  [NOT RUN] Autotune has not been executed yet\n\n");
         send_chunk(buf);

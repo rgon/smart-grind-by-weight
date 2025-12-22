@@ -382,7 +382,7 @@ uint32_t GrindLogger::count_total_events_in_flash() const {
                 if (len > 12 && strncmp(filename, "session_", 8) == 0 && 
                     strcmp(filename + len - 4, ".bin") == 0) {
                     
-                    char full_path[96];
+                    char full_path[PATH_MAX];
                     snprintf(full_path, sizeof(full_path), "%s/%s", GRIND_SESSIONS_DIR, filename);
                     
                     FILE* sessionFile = fopen(full_path, "rb");
@@ -419,7 +419,7 @@ uint32_t GrindLogger::count_total_measurements_in_flash() const {
                 if (len > 12 && strncmp(filename, "session_", 8) == 0 && 
                     strcmp(filename + len - 4, ".bin") == 0) {
                     
-                    char full_path[96];
+                    char full_path[PATH_MAX];
                     snprintf(full_path, sizeof(full_path), "%s/%s", GRIND_SESSIONS_DIR, filename);
                     
                     FILE* sessionFile = fopen(full_path, "rb");
