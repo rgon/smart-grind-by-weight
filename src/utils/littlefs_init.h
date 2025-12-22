@@ -16,10 +16,13 @@ static inline bool littlefs_init(void) {
     
     esp_vfs_littlefs_conf_t conf = {
         .base_path = base_path,
-        .partition_label = "littlefs",
+        // Match partition label defined in partitions.csv
+        .partition_label = "spiffs",
+        .partition = NULL,
         .format_if_mount_failed = true,
         .read_only = false,
         .dont_mount = false,
+        .grow_on_mount = false,
     };
     
     esp_err_t ret = esp_vfs_littlefs_register(&conf);

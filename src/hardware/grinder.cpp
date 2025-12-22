@@ -33,6 +33,8 @@ void Grinder::init(int pin) {
         .resolution_hz = 1000000, // 1MHz resolution = 1µs per tick
         .mem_block_symbols = 64,
         .trans_queue_depth = 4,
+        .intr_priority = 0,
+        .flags = {}
     };
     
     if (rmt_new_tx_channel(&tx_chan_config, &rmt_channel) == ESP_OK) {
@@ -80,6 +82,7 @@ void Grinder::start() {
     
     rmt_transmit_config_t tx_config = {
         .loop_count = -1, // Infinite loop
+        .flags = {}
     };
     
     rmt_transmit(rmt_channel, current_encoder, continuous_data, sizeof(continuous_data), &tx_config);
@@ -152,7 +155,7 @@ void Grinder::start_pulse_rmt(uint32_t duration_ms) {
         pulse_symbols[0].level1 = 0;
         pulse_symbols[0].duration1 = 1; // Minimal LOW to end pulse
         
-        rmt_transmit_config_t tx_config = {.loop_count = 0};
+        rmt_transmit_config_t tx_config = {.loop_count = 0, .flags = {}};
         pulse_active = true;
         grinding = true;
         
@@ -174,7 +177,7 @@ void Grinder::start_pulse_rmt(uint32_t duration_ms) {
         pulse_symbols[1].level1 = 0;
         pulse_symbols[1].duration1 = 0;
         
-        rmt_transmit_config_t tx_config = {.loop_count = (int)loop_count};
+        rmt_transmit_config_t tx_config = {.loop_count = (int)loop_count, .flags = {}};
         pulse_active = true;
         grinding = true;
         
