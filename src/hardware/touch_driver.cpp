@@ -1,7 +1,9 @@
 #include "touch_driver.h"
-#include <Arduino.h>
 #include "esp_err.h"
 #include "esp_log.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_timer.h>
 
 namespace {
 constexpr uint32_t kTouchI2CFrequencyHz = 300000;

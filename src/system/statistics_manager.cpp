@@ -1,9 +1,10 @@
 #include "statistics_manager.h"
 
-#include <Arduino.h>
 #include <cmath>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_timer.h>
 #include <freertos/semphr.h>
 
 StatisticsManager statistics_manager;

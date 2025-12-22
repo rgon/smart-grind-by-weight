@@ -4,7 +4,8 @@
 #include "../hardware/touch_driver.h"
 #include "../hardware/hardware_manager.h"
 #include "../tasks/task_manager.h"
-#include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <BLEDevice.h>
 
 OTAHandler::OTAHandler() 
@@ -225,27 +226,19 @@ bool OTAHandler::complete_ota() {
         LOG_BLE("OTA: Starting restart sequence...\n");
         
         // Restart device
-        LOG_OTA_DEBUG("Flushing Serial before restart...\n");
-        Serial.flush();
+        LOG_OTA_DEBUG("Flushing log before restart...\n");
         delay(100);
         
         // Kamikaze restart - no graceful cleanup needed
         LOG_BLE("OTA: Kamikaze restart in 3...2...1\n");
         LOG_OTA_DEBUG("Final countdown before esp_restart()...\n");
-        Serial.flush();
         delay(100);
         
         LOG_OTA_DEBUG("Calling esp_restart()...\n");
-        Serial.flush();
         esp_restart();
         
-        // Fallback restart methods
-        LOG_OTA_DEBUG("esp_restart() failed, trying ESP.restart()...\n");
-        Serial.flush();
-        ESP.restart();
-        
-        LOG_OTA_DEBUG("ESP.restart() failed, entering infinite loop...\n");
-        Serial.flush();
+        // Fallback restart - this should never execute
+        LOG_OTA_DEBUG("esp_restart() failed, entering infinite loop...\n");
         while(true) delay(1000);
     } else {
         current_status = BLE_OTA_ERROR;
