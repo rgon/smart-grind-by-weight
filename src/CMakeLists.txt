@@ -14,7 +14,8 @@ idf_component_register(SRCS ${app_sources}
                        REQUIRES esp_driver_rmt
                        REQUIRES app_update
                        REQUIRES delta
-                       REQUIRES detools)
+                       REQUIRES detools
+                       REQUIRES esp_psram)
 
 # Add compile definitions
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
