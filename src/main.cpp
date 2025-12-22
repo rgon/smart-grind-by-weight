@@ -1,6 +1,10 @@
-#include <Arduino.h>
-#include <LittleFS.h>
 #include <esp_system.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include "esp_log.h"
+
+// Application includes
+#include "config/logging.h"
 #include "hardware/hardware_manager.h"
 #include "system/state_machine.h"
 #include "system/statistics_manager.h"
@@ -31,40 +35,11 @@ static uint32_t core1_cycle_time_max_ms = 0;
 static uint32_t core1_last_heartbeat_time = 0;
 #endif
 
-void setup() {
-    Serial.begin(HW_SERIAL_BAUD_RATE);
-#ifdef UI_DEBUG_SERIAL_DELAY_MS
-    delay(UI_DEBUG_SERIAL_DELAY_MS);
-#endif
+void app_main(void) {
+    // Initialize logging system
+    logging_init();
     
-    // Log reset reason to help diagnose unexpected resets/freeze scenarios
-    esp_reset_reason_t rr = esp_reset_reason();
-    const char* rr_str = "UNKNOWN";
-    switch (rr) {
-        case ESP_RST_POWERON: rr_str = "POWERON"; break;
-        case ESP_RST_EXT: rr_str = "EXT (Reset Pin)"; break;
-        case ESP_RST_SW: rr_str = "SW (esp_restart)"; break;
-        case ESP_RST_PANIC: rr_str = "PANIC (Exception)"; break;
-        case ESP_RST_INT_WDT: rr_str = "INT_WDT"; break;
-        case ESP_RST_TASK_WDT: rr_str = "TASK_WDT"; break;
-        case ESP_RST_WDT: rr_str = "WDT"; break;
-        case ESP_RST_DEEPSLEEP: rr_str = "DEEPSLEEP"; break;
-        case ESP_RST_BROWNOUT: rr_str = "BROWNOUT"; break;
-        case ESP_RST_SDIO: rr_str = "SDIO"; break;
-        default: break;
-    }
-    LOG_BLE("[STARTUP] Reset reason: %s (%d)\n", rr_str, rr);
-    
-    
-    // Early startup heartbeat - helps capture initialization sequence
-    LOG_BLE("[STARTUP] Initializing ESP32-S3 Coffee Scale - Build %d - Core1 active\n", BUILD_NUMBER);
-    
-    // Initialize LittleFS once - format if necessary
-    if (!LittleFS.begin(true)) {
-        LOG_BLE("ERROR: LittleFS mount failed - continuing without filesystem\n");
-    } else {
-        LOG_BLE("✅ LittleFS mounted successfully\n");
-    }
+    LOG_BLE("[STARTUP] Initializing ESP32-S3 Coffee Scale - Build %d\n", BUILD_NUMBER);
     
     hardware_manager.init();
     profile_controller.init(hardware_manager.get_preferences());
@@ -140,90 +115,94 @@ void setup() {
     file_io_task.init(task_manager.get_file_io_queue());
     
     LOG_BLE("✅ All task modules initialized\n");
-}
-
-void loop() {
-
-
-#if SYS_ENABLE_REALTIME_HEARTBEAT
-    // Core 1 main loop timing (monitor main loop health)
-    uint32_t cycle_start_time = millis();
-    core1_cycle_count_10s++;
-    if (core1_last_heartbeat_time == 0) core1_last_heartbeat_time = cycle_start_time;
-#endif
-
-    // Update device uptime statistics every 15 minutes, reporting back in hours
-    static uint32_t last_uptime_update = 0;
-    static uint32_t pending_uptime_minutes = 0;
-    uint32_t current_time = millis();
-    if (last_uptime_update == 0) {
-        last_uptime_update = current_time;
-    }
-    constexpr uint32_t kUptimeIntervalMs = 900000; // 15 minutes
-    constexpr uint32_t kUptimeIntervalMinutes = 15;
-    uint32_t elapsed_ms = current_time - last_uptime_update;
-    if (elapsed_ms >= kUptimeIntervalMs) {
-        uint32_t intervals = elapsed_ms / kUptimeIntervalMs;
-        pending_uptime_minutes += intervals * kUptimeIntervalMinutes;
-        last_uptime_update += intervals * kUptimeIntervalMs;
-
-        if (pending_uptime_minutes > 0) {
-            statistics_manager.update_uptime(pending_uptime_minutes);
-            pending_uptime_minutes = 0;
+    
+    // Main application loop - runs on core that calls app_main
+    // All heavy lifting is now done by FreeRTOS tasks
+    #if SYS_ENABLE_REALTIME_HEARTBEAT
+    uint32_t core1_cycle_count_10s = 0;
+    uint32_t core1_cycle_time_sum_ms = 0;
+    uint32_t core1_cycle_time_min_ms = UINT32_MAX;
+    uint32_t core1_cycle_time_max_ms = 0;
+    uint32_t core1_last_heartbeat_time = 0;
+    #endif
+    
+    uint32_t last_uptime_update = 0;
+    uint32_t pending_uptime_minutes = 0;
+    bool hardware_suspended = false;
+    
+    while (true) {
+        #if SYS_ENABLE_REALTIME_HEARTBEAT
+        uint32_t cycle_start_time = esp_timer_get_time() / 1000;  // Convert to ms
+        core1_cycle_count_10s++;
+        if (core1_last_heartbeat_time == 0) core1_last_heartbeat_time = cycle_start_time;
+        #endif
+        
+        // Update device uptime statistics every 15 minutes
+        uint32_t current_time = esp_timer_get_time() / 1000;  // Convert to ms
+        if (last_uptime_update == 0) {
+            last_uptime_update = current_time;
         }
-    }
-    
-    // Check OTA state and suspend hardware tasks if needed
-    static bool hardware_suspended = false;
-    bool ota_active = bluetooth_manager.is_updating();
-    
-    if (ota_active && !hardware_suspended) {
-        task_manager.suspend_hardware_tasks();
-        hardware_suspended = true;
-        LOG_BLE("[MAIN] Hardware tasks suspended for OTA\n");
-    } else if (!ota_active && hardware_suspended) {
-        task_manager.resume_hardware_tasks();
-        hardware_suspended = false;
-        LOG_BLE("[MAIN] Hardware tasks resumed after OTA\n");
-    }
-    
-    // UI events are now processed inside the UI render FreeRTOS task
-    // to serialize all LVGL updates on a single thread.
-    
-#if SYS_ENABLE_REALTIME_HEARTBEAT
-    // Calculate Core 1 main loop timing
-    uint32_t cycle_end_time = millis();
-    uint32_t cycle_duration = cycle_end_time - cycle_start_time;
-    core1_cycle_time_sum_ms += cycle_duration;
-    if (cycle_duration < core1_cycle_time_min_ms) core1_cycle_time_min_ms = cycle_duration;
-    if (cycle_duration > core1_cycle_time_max_ms) core1_cycle_time_max_ms = cycle_duration;
-    
-    // Core 1 Main Loop Heartbeat - Monitor main loop health (every 10 seconds)
-    if (cycle_end_time - core1_last_heartbeat_time >= SYS_REALTIME_HEARTBEAT_INTERVAL_MS) {
-        uint32_t avg_cycle_time = core1_cycle_count_10s > 0 ? core1_cycle_time_sum_ms / core1_cycle_count_10s : 0;
+        constexpr uint32_t kUptimeIntervalMs = 900000; // 15 minutes
+        constexpr uint32_t kUptimeIntervalMinutes = 15;
+        uint32_t elapsed_ms = current_time - last_uptime_update;
+        if (elapsed_ms >= kUptimeIntervalMs) {
+            uint32_t intervals = elapsed_ms / kUptimeIntervalMs;
+            pending_uptime_minutes += intervals * kUptimeIntervalMinutes;
+            last_uptime_update += intervals * kUptimeIntervalMs;
+
+            if (pending_uptime_minutes > 0) {
+                statistics_manager.update_uptime(pending_uptime_minutes);
+                pending_uptime_minutes = 0;
+            }
+        }
         
-        // Get system states
-        bool is_grinding = grind_controller.is_active();
-        const char* ble_state = bluetooth_manager.is_enabled() ? 
-                               (bluetooth_manager.is_connected() ? "CONN" : "ADV") : "OFF";
-        const char* grinder_state = is_grinding ? "ACTIVE" : "IDLE";
-        const char* tasks_status = task_manager.are_tasks_healthy() ? "HEALTHY" : "ERROR";
-        size_t free_heap_kb = ESP.getFreeHeap() / 1024;
+        // Check OTA state and suspend hardware tasks if needed
+        bool ota_active = bluetooth_manager.is_updating();
         
-        LOG_BLE("[%lums MAIN_LOOP_HEARTBEAT] Cycles: %lu/10s | Avg: %lums (%lu-%lums) | Tasks: %s | BLE: %s | Grinder: %s | Mem: %zuKB | Build: #%d\n",
-               millis(), core1_cycle_count_10s, avg_cycle_time, core1_cycle_time_min_ms, core1_cycle_time_max_ms,
-               tasks_status, ble_state, grinder_state, free_heap_kb, BUILD_NUMBER);
+        if (ota_active && !hardware_suspended) {
+            task_manager.suspend_hardware_tasks();
+            hardware_suspended = true;
+            LOG_BLE("[MAIN] Hardware tasks suspended for OTA\n");
+        } else if (!ota_active && hardware_suspended) {
+            task_manager.resume_hardware_tasks();
+            hardware_suspended = false;
+            LOG_BLE("[MAIN] Hardware tasks resumed after OTA\n");
+        }
         
-        // Reset Core 1 metrics for next interval
-        core1_cycle_count_10s = 0;
-        core1_cycle_time_sum_ms = 0;
-        core1_cycle_time_min_ms = UINT32_MAX;
-        core1_cycle_time_max_ms = 0;
-        core1_last_heartbeat_time = cycle_end_time;
+        #if SYS_ENABLE_REALTIME_HEARTBEAT
+        // Calculate Core 1 main loop timing
+        uint32_t cycle_end_time = esp_timer_get_time() / 1000;  // Convert to ms
+        uint32_t cycle_duration = cycle_end_time - cycle_start_time;
+        core1_cycle_time_sum_ms += cycle_duration;
+        if (cycle_duration < core1_cycle_time_min_ms) core1_cycle_time_min_ms = cycle_duration;
+        if (cycle_duration > core1_cycle_time_max_ms) core1_cycle_time_max_ms = cycle_duration;
+        
+        // Core 1 Main Loop Heartbeat - Monitor main loop health (every 10 seconds)
+        if (cycle_end_time - core1_last_heartbeat_time >= SYS_REALTIME_HEARTBEAT_INTERVAL_MS) {
+            uint32_t avg_cycle_time = core1_cycle_count_10s > 0 ? core1_cycle_time_sum_ms / core1_cycle_count_10s : 0;
+            
+            // Get system states
+            bool is_grinding = grind_controller.is_active();
+            const char* ble_state = bluetooth_manager.is_enabled() ? 
+                                   (bluetooth_manager.is_connected() ? "CONN" : "ADV") : "OFF";
+            const char* grinder_state = is_grinding ? "ACTIVE" : "IDLE";
+            const char* tasks_status = task_manager.are_tasks_healthy() ? "HEALTHY" : "ERROR";
+            size_t free_heap_kb = esp_get_free_heap_size() / 1024;
+            
+            LOG_BLE("[%lums MAIN_LOOP_HEARTBEAT] Cycles: %lu/10s | Avg: %lums (%lu-%lums) | Tasks: %s | BLE: %s | Grinder: %s | Mem: %zuKB | Build: #%d\n",
+                   current_time, core1_cycle_count_10s, avg_cycle_time, core1_cycle_time_min_ms, core1_cycle_time_max_ms,
+                   tasks_status, ble_state, grinder_state, free_heap_kb, BUILD_NUMBER);
+            
+            // Reset Core 1 metrics for next interval
+            core1_cycle_count_10s = 0;
+            core1_cycle_time_sum_ms = 0;
+            core1_cycle_time_min_ms = UINT32_MAX;
+            core1_cycle_time_max_ms = 0;
+            core1_last_heartbeat_time = cycle_end_time;
+        }
+        #endif
+        
+        // Yield to allow FreeRTOS scheduler to run other tasks
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
-#endif
-    
-    // The main loop now runs much lighter since FreeRTOS tasks handle all the heavy work
-    // Just yield to allow FreeRTOS scheduler to run other tasks efficiently
-    vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to prevent starving other tasks
 }
