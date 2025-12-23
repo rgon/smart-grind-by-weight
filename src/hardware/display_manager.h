@@ -16,6 +16,7 @@ private:
     uint32_t screen_width;
     uint32_t screen_height;
     bool initialized;
+    bool psram_ok = false;
 
 public:
     void init();

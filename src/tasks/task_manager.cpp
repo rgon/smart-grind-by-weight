@@ -15,6 +15,7 @@
 #include <esp_task_wdt.h>
 #include <esp_heap_caps.h>
 #include <esp_psram.h>
+#include "esp_lvgl_port.h"
 
 // Global instance
 TaskManager task_manager;
@@ -120,7 +121,8 @@ void TaskManager::cleanup_queues() {
 bool TaskManager::create_all_tasks() {
     // Create tasks in order of priority (highest to lowest)
 
-    // Check PSRAM
+    // Check PSRAM (only when enabled in config)
+    #if CONFIG_SPIRAM
     size_t psram_size = esp_psram_get_size();
     if (psram_size > 0) {
         size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
@@ -128,6 +130,9 @@ bool TaskManager::create_all_tasks() {
     } else {
         LOG_BLE("WARNING: PSRAM not found!\n");
     }
+    #else
+    LOG_BLE("PSRAM disabled in config\n");
+    #endif
     LOG_BLE("Internal RAM: %u bytes free\n", (unsigned)esp_get_free_heap_size());
     
 
@@ -438,6 +443,9 @@ void TaskManager::ui_render_task_impl() {
     while (true) {
         uint32_t start_time = millis();
 
+        // All LVGL API calls must be protected with lvgl_port_lock per esp_lvgl_port docs
+        lvgl_port_lock(0);
+        
         // Process queued UI events from Core 0 here to ensure
         // all LVGL interactions happen on the UI task context
         if (grind_controller) {
@@ -461,7 +469,9 @@ void TaskManager::ui_render_task_impl() {
             ui_manager->update();
         }
         
-        // LVGL processing and display update - this contains lv_timer_handler()
+        lvgl_port_unlock();
+        
+        // Display update (touch driver polling, no LVGL calls inside)
         if (hardware_manager) {
             hardware_manager->get_display()->update();
         }

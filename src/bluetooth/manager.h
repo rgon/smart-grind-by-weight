@@ -1,6 +1,5 @@
 #pragma once
 
-#include "../ble/bluedroid_server.h"
 #include <string>
 #include <functional>
 #include <freertos/FreeRTOS.h>
@@ -10,6 +9,8 @@
 #include "../config/constants.h"
 #include "ota_handler.h"
 #include "data_stream.h"
+// TODO: Re-enable when NimBLE component headers resolve
+// #include "nimble_gatt_server.h"
 
 // Forward declaration to avoid circular dependency
 class UIManager;
@@ -50,36 +51,32 @@ enum BLEDataStatus {
  * Handles BLE connection, characteristic management, and coordinates
  * between OTA updates and data export operations.
  */
-class BluetoothManager : public BLEServerCallbacks, public BLECharacteristicCallbacks {
+class BluetoothManager {
 private:
-    // BLE Server and services
-    BLEServer* ble_server;
-    BLEService* ota_service;
-    BLEService* data_service;
-    BLEService* debug_service;
-    BLEService* sysinfo_service;
+    // TODO: BLE Server and services - re-implement with NimBLE wrapper when headers resolve
+    // ble_nimble::NimBLEServer ble_server;
     
-    // OTA characteristics
-    BLECharacteristic* ota_data_characteristic;
-    BLECharacteristic* ota_control_characteristic;
-    BLECharacteristic* ota_status_characteristic;
-    BLECharacteristic* build_number_characteristic;
+    // OTA characteristics (TODO: use NimBLE CharacteristicHandle types when available)
+    // ble_nimble::CharacteristicHandle ota_data_char;
+    // ble_nimble::CharacteristicHandle ota_control_char;
+    // ble_nimble::CharacteristicHandle ota_status_char;
+    // ble_nimble::CharacteristicHandle build_number_char;
     
     // Data export characteristics
-    BLECharacteristic* data_control_characteristic;
-    BLECharacteristic* data_transfer_characteristic;
-    BLECharacteristic* data_status_characteristic;
+    // ble_nimble::CharacteristicHandle data_control_char;
+    // ble_nimble::CharacteristicHandle data_transfer_char;
+    // ble_nimble::CharacteristicHandle data_status_char;
     
     // Debug characteristics
-    BLECharacteristic* debug_rx_characteristic;
-    BLECharacteristic* debug_tx_characteristic;
+    // ble_nimble::CharacteristicHandle debug_rx_char;
+    // ble_nimble::CharacteristicHandle debug_tx_char;
     
     // System info characteristics
-    BLECharacteristic* sysinfo_system_characteristic;
-    BLECharacteristic* sysinfo_performance_characteristic;
-    BLECharacteristic* sysinfo_hardware_characteristic;
-    BLECharacteristic* sysinfo_sessions_characteristic;
-    BLECharacteristic* sysinfo_diagnostics_characteristic;
+    // ble_nimble::CharacteristicHandle sysinfo_system_char;
+    // ble_nimble::CharacteristicHandle sysinfo_performance_char;
+    // ble_nimble::CharacteristicHandle sysinfo_hardware_char;
+    // ble_nimble::CharacteristicHandle sysinfo_sessions_char;
+    // ble_nimble::CharacteristicHandle sysinfo_diagnostics_char;
     
     // Connection state
     bool device_connected;
@@ -118,10 +115,10 @@ private:
     void enqueue_ui_status(const char* status);
     void set_ota_status(BLEOTAStatus status);
     void set_data_status(BLEDataStatus status);
-    void handle_ota_control_command(BLECharacteristic* characteristic);
-    void handle_ota_data_chunk(BLECharacteristic* characteristic);
-    void handle_debug_command(BLECharacteristic* characteristic);
-    void handle_data_control_command(BLECharacteristic* characteristic);
+    void handle_ota_control_command(const uint8_t* data, uint16_t len);
+    void handle_ota_data_chunk(const uint8_t* data, uint16_t len);
+    void handle_debug_command(const uint8_t* data, uint16_t len);
+    void handle_data_control_command(const uint8_t* data, uint16_t len);
     void send_next_data_chunk();
     void send_measurement_count();
     void send_log_message(const char* message);
@@ -135,6 +132,8 @@ private:
     void process_sessions_info_updates();
     void mark_sessions_info_dirty();
     void generate_diagnostic_report();
+    void on_connect(uint16_t conn_handle);
+    void on_disconnect(uint16_t conn_handle, int reason);
     
 public:
     BluetoothManager();
@@ -220,14 +219,8 @@ public:
      * Check if OTA failed after reboot and return expected build number if so
      * @return Expected build number if OTA failed, empty string if no failure
      */
-    String check_ota_failure_after_boot();
+    std::string check_ota_failure_after_boot();
     
-    // BLE Callbacks
-    void onConnect(BLEServer* server) override;
-    void onDisconnect(BLEServer* server) override;
-    void onWrite(BLECharacteristic* characteristic) override;
-    void onRead(BLECharacteristic* characteristic) override;
-
     // Drain a status message queued from BLE task; called by UI task
     bool dequeue_ui_status(char* out, size_t out_len);
 };

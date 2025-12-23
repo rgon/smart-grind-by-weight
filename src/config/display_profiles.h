@@ -81,6 +81,7 @@ struct DisplayConfig {
     int16_t ips_invert_x;       // IPS X-axis inversion
     int16_t ips_invert_y;       // IPS Y-axis inversion
     uint8_t min_brightness_pct; // Minimum brightness percentage
+    bool inverted_backlight = false;  // If true, brightness is inverted (1.0 = off, 0.0 = full)
 
     // Pin configuration
     DisplayPinConfig pins;
@@ -91,7 +92,7 @@ struct DisplayConfig {
 
 // Compile-time display selection
 #ifndef DISPLAY_PROFILE
-    #define DISPLAY_PROFILE DisplayProfile::ESP32S3_TOUCH_AMOLED_164
+    #define DISPLAY_PROFILE DisplayProfile::VIEWE_TOUCH_ST7701S_ROUND_21
 #endif
 
 // Display configurations database
@@ -149,12 +150,13 @@ constexpr DisplayConfig DISPLAY_CONFIGS[] = {
         .ips_invert_x = 0,
         .ips_invert_y = 0,
         .min_brightness_pct = 10,
+        .inverted_backlight = true,  // ST7701 backlight: 0xFF = off, 0x00 = full brightness
         .pins = {
             .rst = 8,
             .bl = 7,
             .cs = 18,
-            .sck = 13,
-            .sda = 12,
+            .sck = 1,
+            .sda = 2,
             .d0 = -1,
             .d1 = -1,
             .d2 = -1,

@@ -2,12 +2,16 @@
 #include "../config/constants.h"
 #include "../config/logging.h"
 #include <cstddef>
+#include "esp_psram.h"
+#include "esp_heap_caps.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_lcd_types.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "hal/lcd_types.h"
 #include <cstring>
 
 // Fallback for ESP-IDF versions that don't expose vendor init command helper
@@ -29,6 +33,18 @@ void DisplayManager::init() {
     // Get active display config
     const DisplayConfig& config = ACTIVE_DISPLAY;
 
+    // Check PSRAM availability once up front so we can choose buffer strategy
+    size_t psram_size = esp_psram_get_size();
+    if (psram_size == 0) {
+        esp_err_t psram_err = esp_psram_init();
+        if (psram_err == ESP_OK) {
+            psram_size = esp_psram_get_size();
+        }
+    }
+        psram_ok = psram_size > 0;
+        LOG_BLE("[DISPLAY] PSRAM %s (size=%u bytes, free=%u)", psram_ok ? "OK" : "MISSING",
+            (unsigned)psram_size, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
     // Initialize display hardware
     init_display_hardware(config);
     
@@ -49,12 +65,24 @@ void DisplayManager::init() {
         .task_stack = 6144,
         .task_affinity = -1,
         .task_max_sleep_ms = 500,
-        .timer_period_ms = 5
+        .task_stack_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
+        .timer_period_ms = 5,
     };
     ESP_ERROR_CHECK(lvgl_port_init(&lvgl_cfg));
 
-    // Calculate buffer size (partial buffer for rendering)
-    uint32_t buff_size = screen_width * 40; // 40 lines buffer
+    // Configure LVGL display buffers per official documentation:
+    // Use partial buffer strategy with bounce buffer on RGB panel
+    // Full buffer only used if PSRAM available AND not in bounce buffer mode
+    uint32_t buff_size, trans_size;
+    if (psram_ok) {
+        // With PSRAM: use full screen buffer + DMA transfer region
+        buff_size = screen_width * screen_height;  // Full screen in PSRAM
+        trans_size = screen_width * 40;             // DMA transfer buffer in SRAM
+    } else {
+        // Without PSRAM: use partial buffer approach (like official example)
+        buff_size = screen_width * 100;             // 100-line buffer in SRAM
+        trans_size = 0;                             // No separate DMA buffer
+    }
 
     // Add LCD display to LVGL
     const lvgl_port_display_cfg_t disp_cfg = {
@@ -62,8 +90,8 @@ void DisplayManager::init() {
         .panel_handle = lcd_panel,
         .control_handle = nullptr,
         .buffer_size = buff_size,
-        .double_buffer = true,
-        .trans_size = 0,
+        .double_buffer = false,    // Disable LVGL double buffer; RGB panel manages frame buffers
+        .trans_size = trans_size,   // DMA transfer buffer when using PSRAM canvas
         .hres = screen_width,
         .vres = screen_height,
         .monochrome = false,
@@ -76,8 +104,8 @@ void DisplayManager::init() {
         .color_format = LV_COLOR_FORMAT_RGB565,
 #endif
         .flags = {
-            .buff_dma = false,
-            .buff_spiram = true,
+            .buff_dma = false,        // LVGL buffers in SRAM; RGB panel handles DMA
+            .buff_spiram = psram_ok,  // Use PSRAM for canvas if available
             .sw_rotate = false,
 #if LVGL_VERSION_MAJOR >= 9
             .swap_bytes = false,
@@ -90,23 +118,40 @@ void DisplayManager::init() {
     const lvgl_port_display_rgb_cfg_t rgb_cfg = {
         .flags = {
             .bb_mode = true,  // Bounce buffer mode
-            .avoid_tearing = true,
+            .avoid_tearing = psram_ok,  // only use panel framebuffers when PSRAM is available
         }
     };
     
     lvgl_display = lvgl_port_add_disp_rgb(&disp_cfg, &rgb_cfg);
+    if (!lvgl_display) {
+        LOG_BLE("[DISPLAY] ERROR: lvgl_port_add_disp_rgb returned NULL\n");
+        return;
+    }
     
+    // Per official docs: All LVGL API calls must be protected with lvgl_port_lock/unlock
+    lvgl_port_lock(0);
+    
+    // Apply round display clipping if needed
     if (config.is_round) {
         lv_obj_set_style_clip_corner(lv_scr_act(), true, 0);
     }
+    
+    lvgl_port_unlock();
 
-    // Initialize touch
+    // Initialize physical touch driver
     touch_driver.init();
+    
+    // Register touch input with LVGL per official API
     lvgl_input = lv_indev_create();
     lv_indev_set_type(lvgl_input, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_disp(lvgl_input, lvgl_display);  // Associate input device with display
     lv_indev_set_read_cb(lvgl_input, touchpad_read_cb);
-    
+
+    // Mark as initialized before setting brightness (set_brightness checks initialized flag)
     initialized = true;
+
+    // Ensure backlight is on by default after successful init
+    set_brightness(1.0f);
 }
 
 void DisplayManager::init_display_hardware(const DisplayConfig& config) {
@@ -133,51 +178,57 @@ void DisplayManager::init_rgb_display(const DisplayConfig& config) {
     }
     
     // Configure RGB panel timing based on display profile
-    esp_lcd_rgb_panel_config_t panel_conf = {
-        .clk_src = LCD_CLK_SRC_DEFAULT,
-        .timings = {
-            .pclk_hz = 16 * 1000 * 1000,  // 16 MHz for UEDX48480021
-            .h_res = config.width,
-            .v_res = config.height,
-            .hsync_pulse_width = 8,
-            .hsync_back_porch = 20,
-            .hsync_front_porch = 40,
-            .vsync_pulse_width = 8,
-            .vsync_back_porch = 20,
-            .vsync_front_porch = 50,
-            .flags = {
-                .hsync_idle_low = 0,
-                .vsync_idle_low = 0,
-                .de_idle_high = 0,
-                .pclk_active_neg = false,
-                .pclk_idle_high = 0,
-            },
-        },
-        .data_width = 16,
-        .bits_per_pixel = 16,
-        .num_fbs = 1,
-        .bounce_buffer_size_px = config.width * 10,
-        .sram_trans_align = 0,
-        .dma_burst_size = 64,
-        .hsync_gpio_num = config.pins.hsync,
-        .vsync_gpio_num = config.pins.vsync,
-        .de_gpio_num = config.pins.de,
-        .pclk_gpio_num = config.pins.pclk,
-        .disp_gpio_num = -1,
-        .data_gpio_nums = {
-            config.pins.b0, config.pins.b1, config.pins.b2, config.pins.b3, config.pins.b4,
-            config.pins.g0, config.pins.g1, config.pins.g2, config.pins.g3, config.pins.g4, config.pins.g5,
-            config.pins.r0, config.pins.r1, config.pins.r2, config.pins.r3, config.pins.r4,
-        },
-        .flags = {
-            .disp_active_low = 0,
-            .refresh_on_demand = 0,
-            .fb_in_psram = 1,
-            .double_fb = 0,
-            .no_fb = 0,
-            .bb_invalidate_cache = 0,
-        },
-    };
+    esp_lcd_rgb_panel_config_t panel_conf = {};
+    panel_conf.clk_src = LCD_CLK_SRC_PLL160M;  // Match Espressif reference BSP
+    panel_conf.timings.pclk_hz = 26 * 1000 * 1000;  // 20 MHz for UEDX48480021 | TODO: try 26
+    panel_conf.timings.h_res = config.width;
+    panel_conf.timings.v_res = config.height;
+    panel_conf.timings.hsync_pulse_width = 8;
+    panel_conf.timings.hsync_back_porch = 10;
+    panel_conf.timings.hsync_front_porch = 50;
+    panel_conf.timings.vsync_pulse_width = 2;
+    panel_conf.timings.vsync_back_porch = 18;
+    panel_conf.timings.vsync_front_porch = 8;
+    panel_conf.timings.flags.hsync_idle_low = 1;  // Active-high pulse => idle low
+    panel_conf.timings.flags.vsync_idle_low = 1;  // Active-high pulse => idle low
+    panel_conf.timings.flags.de_idle_high = 0;
+    panel_conf.timings.flags.pclk_active_neg = false;
+    panel_conf.timings.flags.pclk_idle_high = 0;
+    panel_conf.data_width = 16;
+    // panel_conf.bits_per_pixel = 16;
+    panel_conf.in_color_format = lcd_color_format_t::LCD_COLOR_FMT_RGB565;
+    panel_conf.out_color_format = lcd_color_format_t::LCD_COLOR_FMT_RGB565;
+    panel_conf.num_fbs = static_cast<size_t>(psram_ok ? 2 : 0);
+    panel_conf.bounce_buffer_size_px = psram_ok ? (size_t)(config.width * 30) : (size_t)(config.width * 30);
+    panel_conf.dma_burst_size = 64;
+    panel_conf.hsync_gpio_num = (gpio_num_t)config.pins.hsync;
+    panel_conf.vsync_gpio_num = (gpio_num_t)config.pins.vsync;
+    panel_conf.de_gpio_num = (gpio_num_t)config.pins.de;
+    panel_conf.pclk_gpio_num = (gpio_num_t)config.pins.pclk;
+    panel_conf.disp_gpio_num = (gpio_num_t)(-1);
+    panel_conf.data_gpio_nums[0] = (gpio_num_t)config.pins.b0;
+    panel_conf.data_gpio_nums[1] = (gpio_num_t)config.pins.b1;
+    panel_conf.data_gpio_nums[2] = (gpio_num_t)config.pins.b2;
+    panel_conf.data_gpio_nums[3] = (gpio_num_t)config.pins.b3;
+    panel_conf.data_gpio_nums[4] = (gpio_num_t)config.pins.b4;
+    panel_conf.data_gpio_nums[5] = (gpio_num_t)config.pins.g0;
+    panel_conf.data_gpio_nums[6] = (gpio_num_t)config.pins.g1;
+    panel_conf.data_gpio_nums[7] = (gpio_num_t)config.pins.g2;
+    panel_conf.data_gpio_nums[8] = (gpio_num_t)config.pins.g3;
+    panel_conf.data_gpio_nums[9] = (gpio_num_t)config.pins.g4;
+    panel_conf.data_gpio_nums[10] = (gpio_num_t)config.pins.g5;
+    panel_conf.data_gpio_nums[11] = (gpio_num_t)config.pins.r0;
+    panel_conf.data_gpio_nums[12] = (gpio_num_t)config.pins.r1;
+    panel_conf.data_gpio_nums[13] = (gpio_num_t)config.pins.r2;
+    panel_conf.data_gpio_nums[14] = (gpio_num_t)config.pins.r3;
+    panel_conf.data_gpio_nums[15] = (gpio_num_t)config.pins.r4;
+    // user_fbs is an array, leave it zero-initialized
+    panel_conf.flags.disp_active_low = 0;
+    panel_conf.flags.refresh_on_demand = 0;
+    panel_conf.flags.fb_in_psram = static_cast<uint32_t>(psram_ok ? 1 : 0);
+    panel_conf.flags.double_fb = 0;
+    panel_conf.flags.no_fb = static_cast<uint32_t>(psram_ok ? 0 : 1);
+    panel_conf.flags.bb_invalidate_cache = 0;
     
     ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_conf, &lcd_panel));
 }
@@ -230,13 +281,16 @@ static const esp_lcd_panel_vendor_init_cmd_t st7701_init_cmds[] = {
     {0xE8, (uint8_t[]){0x00, 0x00}, 2, 0},
     {0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x00}, 5, 0},
     {0x36, (uint8_t[]){0x00}, 1, 0},  // Memory access control
-    {0x3A, (uint8_t[]){0x66}, 1, 0},  // Pixel format: 18-bit/pixel
+    {0x3A, (uint8_t[]){0x55}, 1, 0},  // Pixel format: 16-bit/pixel (RGB565)
     {0x29, (uint8_t[]){0x00}, 0, 0},  // Display on
 };
 
 esp_err_t DisplayManager::init_st7701_commands(const DisplayConfig& config) {
+    LOG_BLE("[DISPLAY] Initializing ST7701 via 3-wire SPI...\n");
+    
     // Reset LCD
     if (config.pins.rst >= 0) {
+        LOG_BLE("[DISPLAY] Resetting LCD (pin %d)...\n", config.pins.rst);
         gpio_set_direction((gpio_num_t)config.pins.rst, GPIO_MODE_OUTPUT);
         gpio_set_level((gpio_num_t)config.pins.rst, 1);
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -247,32 +301,52 @@ esp_err_t DisplayManager::init_st7701_commands(const DisplayConfig& config) {
     }
     
     // Configure 3-wire SPI for sending commands
-    spi_bus_config_t buscfg = {
-        .mosi_io_num = config.pins.sda,
-        .miso_io_num = -1,
-        .sclk_io_num = config.pins.sck,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 128,
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    // Note: These pins (12, 13) are shared with RGB data lines and only used during init
+    LOG_BLE("[DISPLAY] Configuring SPI bus: SCK=%d, MOSI=%d, CS=%d\n", 
+            config.pins.sck, config.pins.sda, config.pins.cs);
+    
+    spi_bus_config_t buscfg = {};
+    buscfg.mosi_io_num = (gpio_num_t)config.pins.sda;
+    buscfg.miso_io_num = (gpio_num_t)(-1);
+    buscfg.sclk_io_num = (gpio_num_t)config.pins.sck;
+    buscfg.quadwp_io_num = (gpio_num_t)(-1);
+    buscfg.quadhd_io_num = (gpio_num_t)(-1);
+    buscfg.data4_io_num = -1;
+    buscfg.data5_io_num = -1;
+    buscfg.data6_io_num = -1;
+    buscfg.data7_io_num = -1;
+    buscfg.max_transfer_sz = 128;
+    buscfg.flags = SPICOMMON_BUSFLAG_MASTER;
+    
+    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_DISABLED);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        LOG_BLE("[DISPLAY] ERROR: spi_bus_initialize failed: 0x%X (%s)\n", ret, esp_err_to_name(ret));
+        return ret;
+    }
+    if (ret == ESP_ERR_INVALID_STATE) {
+        LOG_BLE("[DISPLAY] WARNING: SPI bus already initialized (expected if reinitializing)\n");
+    }
     
     esp_lcd_panel_io_handle_t io_handle = NULL;
-    esp_lcd_panel_io_spi_config_t io_config = {
-        .cs_gpio_num = config.pins.cs,
-        .dc_gpio_num = -1,  // 3-wire SPI (no DC pin)
-        .spi_mode = 0,
-        .pclk_hz = 1 * 1000 * 1000,  // 1 MHz for init commands
-        .trans_queue_depth = 10,
-        .lcd_cmd_bits = 8,
-        .lcd_param_bits = 8,
-        .flags = {
-            .dc_low_on_data = 0,
-            .octal_mode = 0,
-            .lsb_first = 0,
-        },
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &io_handle));
+    esp_lcd_panel_io_spi_config_t io_config = {};
+    io_config.cs_gpio_num = (gpio_num_t)config.pins.cs;
+    io_config.dc_gpio_num = (gpio_num_t)(-1);  // 3-wire SPI (no DC pin)
+    io_config.spi_mode = 0;
+    io_config.pclk_hz = 2 * 1000 * 1000;  // 2 MHz for init commands (was 1 MHz)
+    io_config.trans_queue_depth = 10;
+    io_config.lcd_cmd_bits = 8;
+    io_config.lcd_param_bits = 8;
+    io_config.flags.lsb_first = 0;
+    
+    ret = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &io_handle);
+    if (ret != ESP_OK) {
+        LOG_BLE("[DISPLAY] ERROR: esp_lcd_new_panel_io_spi failed: 0x%X (%s)\n", ret, esp_err_to_name(ret));
+        spi_bus_free(SPI2_HOST);
+        return ret;
+    }
+    
+    LOG_BLE("[DISPLAY] Sending %d ST7701 init commands...\n", 
+            sizeof(st7701_init_cmds) / sizeof(st7701_init_cmds[0]));
     
     // Send initialization commands
     for (size_t i = 0; i < sizeof(st7701_init_cmds) / sizeof(st7701_init_cmds[0]); i++) {
@@ -283,9 +357,13 @@ esp_err_t DisplayManager::init_st7701_commands(const DisplayConfig& config) {
         }
     }
     
+    LOG_BLE("[DISPLAY] ST7701 init commands sent successfully\n");
+    
     // Clean up panel IO (we only need it for initialization)
     esp_lcd_panel_io_del(io_handle);
     spi_bus_free(SPI2_HOST);
+    
+    LOG_BLE("[DISPLAY] SPI bus freed, pins 12/13 now available for RGB data\n");
     
     return ESP_OK;
 }
@@ -293,8 +371,11 @@ esp_err_t DisplayManager::init_st7701_commands(const DisplayConfig& config) {
 void DisplayManager::update() {
     if (!initialized) return;
     
+    // Update touch driver (reads hardware state, no LVGL calls)
     touch_driver.update();
-    lv_timer_handler();
+    
+    // Note: lv_timer_handler() is called automatically by esp_lvgl_port's internal task
+    // We should NOT call it manually to avoid race conditions
 }
 
 void DisplayManager::touchpad_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
@@ -312,9 +393,15 @@ void DisplayManager::touchpad_read_cb(lv_indev_t* indev, lv_indev_data_t* data) 
 }
 
 void DisplayManager::set_brightness(float brightness) {
-    if (!initialized) return;
+    if (!initialized) {
+        LOG_BLE("[DISPLAY] WARNING: set_brightness called before initialized\n");
+        return;
+    }
     
     const DisplayConfig& config = ACTIVE_DISPLAY;
+    
+    LOG_BLE("[DISPLAY] set_brightness(%.2f) - driver: %s, bl_pin: %d, inverted: %d\n", 
+            brightness, config.driver_name, config.pins.bl, config.inverted_backlight);
     
     // Clamp brightness to valid hardware range [0.0, 1.0]
     if (brightness < 0.0f) brightness = 0.0f;
@@ -324,22 +411,38 @@ void DisplayManager::set_brightness(float brightness) {
     float min_brightness = config.min_brightness_pct / 100.0f;
     if (brightness < min_brightness) brightness = min_brightness;
     
+    LOG_BLE("[DISPLAY] After clamp/min: brightness=%.2f\n", brightness);
+    
+    // Handle backlight inversion if configured
+    if (config.inverted_backlight) {
+        brightness = 1.0f - brightness;  // Invert: 1.0 becomes 0.0, 0.0 becomes 1.0
+        LOG_BLE("[DISPLAY] After invert: brightness=%.2f\n", brightness);
+    }
+    
     // Set brightness based on driver type
     if (strcmp(config.driver_name, "ST7701") == 0) {
         // ST7701: Use PWM-based backlight control
         if (config.pins.bl >= 0) {
             uint8_t brightness_value = (uint8_t)(brightness * 255.0f);
+            LOG_BLE("[DISPLAY] Setting ST7701 backlight to duty=%u (0x%02X)\n", brightness_value, brightness_value);
+            
             // Configure PWM for backlight pin if not already configured
             static bool bl_pwm_configured = false;
             if (!bl_pwm_configured) {
+                LOG_BLE("[DISPLAY] Configuring LEDC PWM for backlight...\n");
                 ledc_timer_config_t ledc_timer = {
                     .speed_mode = LEDC_LOW_SPEED_MODE,
                     .duty_resolution = LEDC_TIMER_8_BIT,
                     .timer_num = LEDC_TIMER_0,
                     .freq_hz = 5000,
-                    .clk_cfg = LEDC_AUTO_CLK
+                    .clk_cfg = LEDC_AUTO_CLK,
+                    .deconfigure = false
                 };
-                ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+                esp_err_t timer_err = ledc_timer_config(&ledc_timer);
+                if (timer_err != ESP_OK) {
+                    LOG_BLE("[DISPLAY] ERROR: ledc_timer_config failed: 0x%X\n", timer_err);
+                    return;
+                }
 
                 ledc_channel_config_t ledc_channel = {
                     .gpio_num = config.pins.bl,
@@ -348,17 +451,41 @@ void DisplayManager::set_brightness(float brightness) {
                     .intr_type = LEDC_INTR_DISABLE,
                     .timer_sel = LEDC_TIMER_0,
                     .duty = 0,
-                    .hpoint = 0
+                    .hpoint = 0,
+                    .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD,
+                    .flags = {},
+                    .deconfigure = false
                 };
-                ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+                esp_err_t chan_err = ledc_channel_config(&ledc_channel);
+                if (chan_err != ESP_OK) {
+                    LOG_BLE("[DISPLAY] ERROR: ledc_channel_config failed: 0x%X\n", chan_err);
+                    return;
+                }
+                LOG_BLE("[DISPLAY] LEDC PWM configured successfully\n");
                 bl_pwm_configured = true;
             }
-            ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, brightness_value));
-            ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+            
+            esp_err_t duty_err = ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, brightness_value);
+            if (duty_err != ESP_OK) {
+                LOG_BLE("[DISPLAY] ERROR: ledc_set_duty failed: 0x%X\n", duty_err);
+                return;
+            }
+            
+            esp_err_t update_err = ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+            if (update_err != ESP_OK) {
+                LOG_BLE("[DISPLAY] ERROR: ledc_update_duty failed: 0x%X\n", update_err);
+                return;
+            }
+            
+            LOG_BLE("[DISPLAY] Backlight duty set successfully\n");
+        } else {
+            LOG_BLE("[DISPLAY] WARNING: Backlight pin not configured (bl=%d)\n", config.pins.bl);
         }
     }
     else if (strcmp(config.driver_name, "CO5300") == 0) {
         // CO5300: Not implemented with esp_lvgl_port
         LOG_BLE("[DISPLAY] WARNING: CO5300 brightness control not implemented\n");
+    } else {
+        LOG_BLE("[DISPLAY] WARNING: Unknown driver for brightness control: %s\n", config.driver_name);
     }
 }

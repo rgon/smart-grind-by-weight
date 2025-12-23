@@ -25,3 +25,7 @@ failed_session_*.bin
 
 # Git worktrees
 .worktrees/
+
+# Generated sdkconfig files:
+sdkconfig.*
+!sdkconfig.defaults

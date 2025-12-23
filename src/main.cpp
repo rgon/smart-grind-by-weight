@@ -3,6 +3,8 @@
 #include <freertos/task.h>
 #include <esp_timer.h>
 #include "esp_log.h"
+#include <esp_ota_ops.h>
+#include "esp_lvgl_port.h"
 
 // Application includes
 #include "config/logging.h"
@@ -28,22 +30,24 @@ UIManager ui_manager;
 BluetoothManager g_bluetooth_manager;
 BluetoothManager& bluetooth_manager = g_bluetooth_manager;
 
-#if SYS_ENABLE_REALTIME_HEARTBEAT
-// Core 1 timing metrics (global scope for main loop access)
-static uint32_t core1_cycle_count_10s = 0;
-static uint32_t core1_cycle_time_sum_ms = 0;
-static uint32_t core1_cycle_time_min_ms = UINT32_MAX;
-static uint32_t core1_cycle_time_max_ms = 0;
-static uint32_t core1_last_heartbeat_time = 0;
-#endif
-
 extern "C" void app_main(void) {
     // Initialize logging system
     logging_init();
+    LOG_BLE("[EARLY] Entered app_main()");
     
     // Initialize LittleFS filesystem (must be before any file I/O)
     if (!littlefs_init()) {
         LOG_BLE("[STARTUP] WARNING: LittleFS initialization failed\n");
+    }
+
+    // Ensure bootloader selects the current OTA slot instead of defaulting to factory
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    if (running) {
+        if (esp_ota_set_boot_partition(running) == ESP_OK) {
+            LOG_BLE("[STARTUP] Boot partition set to '%s'\n", running->label);
+        } else {
+            LOG_BLE("[STARTUP] WARNING: Failed to set boot partition\n");
+        }
     }
     
     LOG_BLE("[STARTUP] Initializing ESP32-S3 Coffee Scale - Build %d\n", BUILD_NUMBER);
@@ -75,7 +79,10 @@ extern "C" void app_main(void) {
         state_machine.init(UIState::READY);
     }
     
+    // Initialize UI with LVGL port locking (required by esp_lvgl_port)
+    lvgl_port_lock(0);
     ui_manager.init(&hardware_manager, &state_machine, &profile_controller, &grind_controller, &bluetooth_manager);
+    lvgl_port_unlock();
     
     // Store OTA failure info in ui_manager if needed
     if (ota_failed) {

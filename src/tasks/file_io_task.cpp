@@ -1,7 +1,6 @@
 #include "file_io_task.h"
 #include "../logging/grind_logging.h"
 #include "../config/logging.h"
-#include "../utils/littlefs_init.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -55,13 +54,10 @@ FileIOTask::~FileIOTask() {
 void FileIOTask::init(QueueHandle_t io_queue) {
     file_io_queue = io_queue;
     
-    // Check initial filesystem availability
-    filesystem_available = littlefs_init();
-    if (filesystem_available) {
-        LOG_BLE("FileIOTask: LittleFS filesystem available at /littlefs\n");
-    } else {
-        LOG_BLE("FileIOTask: LittleFS filesystem unavailable\n");
-    }
+    // LittleFS is already initialized in main.cpp before tasks start
+    // Just assume it's available (it was checked during main initialization)
+    filesystem_available = true;
+    LOG_BLE("FileIOTask: LittleFS filesystem available at /littlefs\n");
     
     LOG_BLE("FileIOTask: Initialized with file I/O queue\n");
 }
