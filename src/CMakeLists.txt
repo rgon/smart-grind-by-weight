@@ -4,7 +4,7 @@
 file(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.*)
 
 idf_component_register(SRCS ${app_sources}
-                       INCLUDE_DIRS "."
+                       INCLUDE_DIRS "." "${CMAKE_SOURCE_DIR}/include"
                        REQUIRES littlefs
                        REQUIRES lvgl
                        REQUIRES esp_lvgl_port
@@ -12,6 +12,7 @@ idf_component_register(SRCS ${app_sources}
                        REQUIRES esp_timer
                        REQUIRES driver
                        REQUIRES esp_driver_rmt
+                       REQUIRES esp_driver_ledc
                        REQUIRES app_update
                        REQUIRES delta
                        REQUIRES detools
@@ -19,7 +20,6 @@ idf_component_register(SRCS ${app_sources}
 
 # Add compile definitions
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
-    LV_LVGL_H_INCLUDE_SIMPLE
     NO_GLOBAL_UPDATE   # Required by esp32-flashz
     FZ_NOHTTPCLIENT    # Disable HTTP client (BLE only)
 )
