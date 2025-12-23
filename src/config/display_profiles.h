@@ -155,8 +155,10 @@ constexpr DisplayConfig DISPLAY_CONFIGS[] = {
             .rst = 8,
             .bl = 7,
             .cs = 18,
-            .sck = 1,
-            .sda = 2,
+            // This display shares SCK and SDA with some of the blue color bits
+            // for initialization via 3-wire SPI
+            .sck = 13,
+            .sda = 12,
             .d0 = -1,
             .d1 = -1,
             .d2 = -1,

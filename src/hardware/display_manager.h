@@ -27,6 +27,9 @@ public:
     uint32_t get_height() const { return screen_height; }
     bool is_initialized() const { return initialized; }
     TouchDriver* get_touch_driver() { return &touch_driver; }
+
+    // Diagnostic: draw a simple test pattern directly to the panel
+    void draw_test_pattern();
     
 private:
     static void touchpad_read_cb(lv_indev_t* indev, lv_indev_data_t* data);
