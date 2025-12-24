@@ -570,7 +570,7 @@ void WeightSensor::load_calibration() {
         float saved_factor = prefs->getFloat("hx_cal", USER_DEFAULT_CALIBRATION_FACTOR);
         
         // Check for corrupted/invalid calibration data
-        if (isnan(saved_factor) || !isfinite(saved_factor) || saved_factor == 0.0) {
+        if (isnan(saved_factor) || !std::isfinite(saved_factor) || saved_factor == 0.0) {
             LOG_BLE("WARNING: Invalid calibration factor detected, using default\n");
             saved_factor = USER_DEFAULT_CALIBRATION_FACTOR;
             // Clear corrupted data and save default
@@ -767,7 +767,7 @@ float WeightSensor::get_saved_calibration_factor() {
         float saved_factor = prefs->getFloat("hx_cal", USER_DEFAULT_CALIBRATION_FACTOR);
         
         // Validate saved factor
-        if (isnan(saved_factor) || !isfinite(saved_factor) || saved_factor == 0.0) {
+        if (isnan(saved_factor) || !std::isfinite(saved_factor) || saved_factor == 0.0) {
             return USER_DEFAULT_CALIBRATION_FACTOR;
         }
         return saved_factor;
