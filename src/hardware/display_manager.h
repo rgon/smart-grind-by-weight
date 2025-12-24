@@ -32,8 +32,6 @@ public:
     void draw_test_pattern();
     
 private:
-    static void touchpad_read_cb(lv_indev_t* indev, lv_indev_data_t* data);
-
     void init_display_hardware(const DisplayConfig& config);
     void init_rgb_display(const DisplayConfig& config);
     esp_err_t init_st7701_commands(const DisplayConfig& config);

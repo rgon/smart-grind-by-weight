@@ -140,12 +140,22 @@ void DisplayManager::init() {
         return;
     }
     
-    // /* Add touch input (for selected screen) */
-    // const lvgl_port_touch_cfg_t touch_cfg = {
-    //     .disp = lvgl_disp,
-    //     .handle = touch_handle,
-    // };
-    // lvgl_touch_indev = lvgl_port_add_touch(&touch_cfg);
+    // Initialize physical touch driver using esp_lcd_touch library
+    touch_driver.init();
+
+    // Add touch input (for selected screen) AFTER touch driver is initialized
+    if (lvgl_display && touch_driver.get_handle() != nullptr) {
+        const lvgl_port_touch_cfg_t touch_cfg = {
+            .disp = lvgl_display,
+            .handle = touch_driver.get_handle(),
+        };
+        lv_indev_t* touch_handle = lvgl_port_add_touch(&touch_cfg);
+        // /* If deinitializing LVGL port, remember to delete all touches: */
+        // lvgl_port_remove_touch(touch_handle);
+        LOG_BLE("[DISPLAY] Touch device registered with LVGL\n");
+    } else {
+        LOG_BLE("[DISPLAY] Touch driver not available, touch input disabled\n");
+    }
 
     // Per official docs: All LVGL API calls must be protected with lvgl_port_lock/unlock
     // lvgl_port_lock(0);
@@ -154,15 +164,6 @@ void DisplayManager::init() {
     //     lv_obj_set_style_clip_corner(lv_scr_act(), true, 0);
     // }
     // lvgl_port_unlock();
-
-    // Initialize physical touch driver
-    touch_driver.init();
-    
-    // Register touch input with LVGL per official API
-    lvgl_input = lv_indev_create();
-    lv_indev_set_type(lvgl_input, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_disp(lvgl_input, lvgl_display);  // Associate input device with display
-    lv_indev_set_read_cb(lvgl_input, touchpad_read_cb);
 
     // Turn on backlight after LVGL init (vendor does this in app_main after UI init)
     if (config.pins.bl >= 0) {
@@ -453,25 +454,8 @@ esp_err_t DisplayManager::init_st7701_commands(const DisplayConfig& config) {
 void DisplayManager::update() {
     if (!initialized) return;
     
-    // Update touch driver (reads hardware state, no LVGL calls)
+    // Update touch driver (track touch timing for screen timeout, no LVGL calls)
     touch_driver.update();
-    
-    // Note: lv_timer_handler() is called automatically by esp_lvgl_port's internal task
-    // We should NOT call it manually to avoid race conditions
-}
-
-void DisplayManager::touchpad_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
-    if (!g_display_manager) return;
-    
-    TouchData touch = g_display_manager->touch_driver.get_touch_data();
-    
-    if (touch.pressed) {
-        data->state = LV_INDEV_STATE_PRESSED;
-        data->point.x = touch.x;
-        data->point.y = touch.y;
-    } else {
-        data->state = LV_INDEV_STATE_RELEASED;
-    }
 }
 
 void DisplayManager::draw_test_pattern() {
@@ -535,6 +519,7 @@ void DisplayManager::draw_test_pattern() {
     
     LOG_BLE("[DISPLAY] Test pattern written to framebuffer\n");
 }
+
 void DisplayManager::set_brightness(float brightness) {
     if (!initialized) {
         LOG_BLE("[DISPLAY] WARNING: set_brightness called before initialized\n");

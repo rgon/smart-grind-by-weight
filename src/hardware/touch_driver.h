@@ -1,34 +1,65 @@
 #pragma once
-#include <driver/i2c_master.h>
+#include <esp_lcd_touch.h>
 #include "../config/constants.h"
 
-struct TouchData {
-    uint16_t x;
-    uint16_t y;
-    bool pressed;
-};
-
+/**
+ * @brief TouchDriver wraps the esp_lcd_touch library to provide unified touch handling.
+ * 
+ * Supports multiple touch controllers (CST826, FT3168, etc.) through esp_lcd_touch.
+ * The actual driver selection is based on ACTIVE_DISPLAY.touch.controller.
+ */
 class TouchDriver {
-private:
-    TouchData last_touch;
-    bool initialized;
-    bool disabled;
-    
-    // Touch activity tracking
-    uint32_t last_touch_time;
-
 public:
+    /**
+     * @brief Initialize the touch driver based on display configuration.
+     */
     void init();
-    void update();
+
+    /**
+     * @brief Deinitialize the touch driver (cleanup resources).
+     */
+    void deinit();
+
+    /**
+     * @brief Disable touch input (e.g., during OTA updates).
+     */
     void disable();
+
+    /**
+     * @brief Re-enable touch input.
+     */
     void enable();
-    TouchData get_touch_data() const { return last_touch; }
-    bool is_pressed() const { return last_touch.pressed; }
-    
-    // Touch activity timing
+
+    /**
+     * @brief Update touch tracking (call periodically to track touch activity time).
+     */
+    void update();
+
+    /**
+     * @brief Get the underlying esp_lcd_touch handle.
+     * @return Touch device handle, or nullptr if not initialized.
+     */
+    esp_lcd_touch_handle_t get_handle() const { return touch_handle_; }
+
+    /**
+     * @brief Check if touch is initialized.
+     */
+    bool is_initialized() const { return initialized_; }
+
+    /**
+     * @brief Check if touch is disabled.
+     */
+    bool is_disabled() const { return disabled_; }
+
+    /**
+     * @brief Get milliseconds elapsed since the last touch event.
+     * @return Time in milliseconds, or 0 if touch is disabled or never touched.
+     */
     uint32_t get_ms_since_last_touch() const;
 
 private:
-    i2c_master_bus_handle_t bus_handle = nullptr;
-    i2c_master_dev_handle_t device_handle = nullptr;
+    esp_lcd_touch_handle_t touch_handle_ = nullptr;
+    bool initialized_ = false;
+    bool disabled_ = false;
+    uint32_t last_touch_time_ = 0;  // Track last touch activity
 };
